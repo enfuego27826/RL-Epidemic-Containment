@@ -15,7 +15,15 @@ Training loop sketch
    policy-gradient + value + entropy losses and updating parameters.
 4. Repeat until ``total_timesteps`` is reached.
 
-TODO (Phase 2): replace per-node discrete logits with hybrid action logits.
+Phase 2 changes
+---------------
+- When ``config["phase"] == 2`` (or ``config["hybrid"]["enabled"] == True``),
+  the loop uses ``HybridActorCritic`` and stores combined log-probs.
+- The PPO objective is extended with separate entropy coefficients for the
+  discrete and continuous heads.
+- ``RolloutBuffer`` stores ``log_probs_discrete`` and ``log_probs_continuous``
+  in addition to the combined scalar.
+
 TODO (Phase 3): wire ST-GNN encoder into ActorCritic.forward().
 TODO: replace pure-Python parameter updates with PyTorch autograd.
 """
@@ -41,16 +49,25 @@ logger = logging.getLogger(__name__)
 class RolloutBuffer:
     """Stores one rollout of (obs, action, log_prob, reward, done, value).
 
-    All fields are plain Python lists to avoid external dependencies in this
-    baseline scaffold.
+    Phase 2 additions:
+    - ``actions_hybrid``: list of action dicts (discrete + continuous)
+    - ``log_probs_discrete``: per-step combined discrete log-prob (scalar)
+    - ``log_probs_continuous``: per-step combined continuous log-prob (scalar)
+
+    All fields are plain Python lists to avoid external dependencies.
     """
 
     obs: list[list[float]] = field(default_factory=list)
-    actions: list[list[int]] = field(default_factory=list)
-    log_probs: list[list[float]] = field(default_factory=list)
+    # Phase 1: list[int] per step; Phase 2: list[dict] per step
+    actions: list[Any] = field(default_factory=list)
+    log_probs: list[Any] = field(default_factory=list)
     rewards: list[float] = field(default_factory=list)
     dones: list[bool] = field(default_factory=list)
     values: list[float] = field(default_factory=list)
+
+    # Phase 2 fields (empty in phase 1, populated in phase 2)
+    log_probs_discrete: list[float] = field(default_factory=list)
+    log_probs_continuous: list[float] = field(default_factory=list)
 
     # Filled by compute_advantages()
     returns: list[float] = field(default_factory=list)
@@ -61,6 +78,7 @@ class RolloutBuffer:
         for lst in (
             self.obs, self.actions, self.log_probs,
             self.rewards, self.dones, self.values,
+            self.log_probs_discrete, self.log_probs_continuous,
             self.returns, self.advantages,
         ):
             lst.clear()
@@ -90,6 +108,7 @@ class PPOBaseline:
         env_cfg = config["env"]
         ppo_cfg = config["ppo"]
         model_cfg = config.get("model", {})
+        hybrid_cfg = config.get("hybrid", {})
 
         self.task_name: str = env_cfg["task_name"]
         self.seed: int = int(env_cfg.get("seed", 42))
@@ -116,6 +135,15 @@ class PPOBaseline:
 
         hidden_dims: list[int] = list(model_cfg.get("hidden_dims", [128, 128]))
 
+        # Phase 2: hybrid mode flag
+        self.hybrid_mode: bool = bool(hybrid_cfg.get("enabled", False))
+        self.entropy_coef_discrete: float = float(
+            hybrid_cfg.get("entropy_coef_discrete", self.entropy_coef)
+        )
+        self.entropy_coef_continuous: float = float(
+            hybrid_cfg.get("entropy_coef_continuous", self.entropy_coef * 0.1)
+        )
+
         # Lazy import of adapter — keeps module importable even without env deps
         from src.env.openenv_adapter import (
             NUM_DISCRETE_ACTIONS,
@@ -130,15 +158,26 @@ class PPOBaseline:
         obs_tensor, _ = self._adapter.reset()
         obs_dim = len(obs_tensor)
 
-        from src.models.actor_critic import ActorCritic
+        if self.hybrid_mode:
+            from src.models.actor_critic import HybridActorCritic
 
-        self._policy = ActorCritic(
-            obs_dim=obs_dim,
-            action_dim=NUM_DISCRETE_ACTIONS,
-            max_nodes=self.max_nodes,
-            hidden_dims=hidden_dims,
-            seed=self.seed,
-        )
+            self._policy = HybridActorCritic(
+                obs_dim=obs_dim,
+                action_dim=NUM_DISCRETE_ACTIONS,
+                max_nodes=self.max_nodes,
+                hidden_dims=hidden_dims,
+                seed=self.seed,
+            )
+        else:
+            from src.models.actor_critic import ActorCritic
+
+            self._policy = ActorCritic(
+                obs_dim=obs_dim,
+                action_dim=NUM_DISCRETE_ACTIONS,
+                max_nodes=self.max_nodes,
+                hidden_dims=hidden_dims,
+                seed=self.seed,
+            )
 
         self._buffer = RolloutBuffer()
         self._global_step: int = 0
@@ -196,6 +235,10 @@ class PPOBaseline:
     def _collect_rollout(self, obs: list[float]) -> list[float]:
         """Run the current policy for ``n_steps`` and fill the buffer.
 
+        In Phase 2 hybrid mode, uses ``HybridActorCritic.act()`` to produce
+        both discrete and continuous actions, builds an action mask from the
+        current observation, and stores combined log-probs.
+
         Parameters
         ----------
         obs:
@@ -209,17 +252,46 @@ class PPOBaseline:
         self._buffer.clear()
 
         for _ in range(self.n_steps):
-            actions, log_probs, value = self._policy.act(obs)
+            if self.hybrid_mode:
+                # Build action mask from current observation
+                from src.env.action_masking import build_mask
 
-            next_obs, reward, done, _info = self._adapter.step(actions)
-            self._global_step += 1
+                mask = build_mask(
+                    obs_tensor=obs,
+                    max_nodes=self.max_nodes,
+                    num_active_nodes=self._adapter.num_nodes,
+                )
+                vax_budget = self._adapter.vaccine_budget
+                action_dict, lp_disc, lp_cont, value = self._policy.act(
+                    obs,
+                    mask=mask,
+                    vaccine_budget=vax_budget,
+                    deterministic=False,
+                )
+                combined_lp = lp_disc + lp_cont
 
-            self._buffer.obs.append(list(obs))
-            self._buffer.actions.append(list(actions))
-            self._buffer.log_probs.append(list(log_probs))
-            self._buffer.rewards.append(reward)
-            self._buffer.dones.append(done)
-            self._buffer.values.append(value)
+                next_obs, reward, done, _info = self._adapter.step(action_dict)
+                self._global_step += 1
+
+                self._buffer.obs.append(list(obs))
+                self._buffer.actions.append(action_dict)
+                self._buffer.log_probs.append(combined_lp)
+                self._buffer.log_probs_discrete.append(lp_disc)
+                self._buffer.log_probs_continuous.append(lp_cont)
+                self._buffer.rewards.append(reward)
+                self._buffer.dones.append(done)
+                self._buffer.values.append(value)
+            else:
+                actions, log_probs, value = self._policy.act(obs)
+                next_obs, reward, done, _info = self._adapter.step(actions)
+                self._global_step += 1
+
+                self._buffer.obs.append(list(obs))
+                self._buffer.actions.append(list(actions))
+                self._buffer.log_probs.append(list(log_probs))
+                self._buffer.rewards.append(reward)
+                self._buffer.dones.append(done)
+                self._buffer.values.append(value)
 
             obs = next_obs
             if done:
@@ -325,9 +397,12 @@ class PPOBaseline:
     ) -> tuple[float, float, float]:
         """Compute PPO losses for a mini-batch.
 
-        This pure-Python version computes the *values* of the losses as
-        scalars for logging/smoke-test purposes.  A real implementation
-        would keep these as torch.Tensor objects for backprop.
+        Supports both Phase 1 (discrete-only) and Phase 2 (hybrid) modes.
+
+        In Phase 2, the PPO ratio uses the combined log-prob (discrete +
+        continuous), and entropy is computed separately for each head with
+        individual coefficients ``entropy_coef_discrete`` and
+        ``entropy_coef_continuous``.
 
         Parameters
         ----------
@@ -345,34 +420,72 @@ class PPOBaseline:
 
         for idx in batch_idx:
             obs = self._buffer.obs[idx]
-            old_log_probs = self._buffer.log_probs[idx]  # list[float] per node
             adv = self._buffer.advantages[idx]
             ret = self._buffer.returns[idx]
 
-            # Forward pass
-            action_logits, value = self._policy.forward(obs)
+            if self.hybrid_mode:
+                # ── Phase 2: hybrid PPO losses ───────────────────────────
+                action_dict = self._buffer.actions[idx]
+                old_lp = float(self._buffer.log_probs[idx])  # combined scalar
 
-            # Per-node contributions
-            for node_i, (logits, old_lp, act) in enumerate(
-                zip(action_logits, old_log_probs, self._buffer.actions[idx])
-            ):
-                from src.models.actor_critic import _softmax
+                from src.env.action_masking import build_mask
+                from src.models.hybrid_action import HybridActionDist
 
-                probs = _softmax(logits)
-                new_lp = math.log(max(probs[act], 1e-8))
+                mask = build_mask(
+                    obs_tensor=obs,
+                    max_nodes=self.max_nodes,
+                    num_active_nodes=self._adapter.num_nodes,
+                )
+                vax_budget = self._adapter.vaccine_budget
+                discrete_logits, cont_logits, value = self._policy.forward(obs)
 
-                # Importance ratio
+                dist = HybridActionDist(
+                    discrete_logits=discrete_logits,
+                    continuous_logits=cont_logits,
+                    mask=mask,
+                    vaccine_budget=vax_budget,
+                )
+
+                _, _, new_lp = dist.log_prob(
+                    discrete=action_dict["discrete"],
+                    continuous=action_dict["continuous"],
+                )
+
                 ratio = math.exp(new_lp - old_lp)
                 clipped_ratio = max(
                     min(ratio, 1.0 + self.clip_eps), 1.0 - self.clip_eps
                 )
                 policy_loss -= min(ratio * adv, clipped_ratio * adv)
 
-                # Entropy for this node
-                ent_node = -sum(p * math.log(max(p, 1e-8)) for p in probs)
-                entropy += ent_node
+                ent_disc, ent_cont = dist.entropy()
+                entropy += (
+                    self.entropy_coef_discrete * ent_disc
+                    + self.entropy_coef_continuous * ent_cont
+                )
 
-            # Value loss (clipped)
+            else:
+                # ── Phase 1: discrete-only PPO losses ───────────────────
+                old_log_probs = self._buffer.log_probs[idx]  # list[float] per node
+                action_logits, value = self._policy.forward(obs)
+
+                from src.models.actor_critic import _softmax
+
+                for node_i, (logits, old_lp, act) in enumerate(
+                    zip(action_logits, old_log_probs, self._buffer.actions[idx])
+                ):
+                    probs = _softmax(logits)
+                    new_lp = math.log(max(probs[act], 1e-8))
+
+                    ratio = math.exp(new_lp - old_lp)
+                    clipped_ratio = max(
+                        min(ratio, 1.0 + self.clip_eps), 1.0 - self.clip_eps
+                    )
+                    policy_loss -= min(ratio * adv, clipped_ratio * adv)
+
+                    ent_node = -sum(p * math.log(max(p, 1e-8)) for p in probs)
+                    entropy += ent_node
+
+            # Value loss (clipped) — same for both modes
             value_loss += (value - ret) ** 2
 
         n = max(len(batch_idx), 1)
@@ -380,11 +493,17 @@ class PPOBaseline:
         value_loss = 0.5 * value_loss / n
         entropy /= n
 
-        total_loss = (
-            policy_loss
-            + self.value_loss_coef * value_loss
-            - self.entropy_coef * entropy
-        )
+        if not self.hybrid_mode:
+            # Phase 1 uses a single entropy_coef; entropy already summed
+            total_loss = (
+                policy_loss
+                + self.value_loss_coef * value_loss
+                - self.entropy_coef * entropy
+            )
+        else:
+            # Phase 2 entropy coefficients already applied above
+            total_loss = policy_loss + self.value_loss_coef * value_loss - entropy
+
         return policy_loss, value_loss, entropy
 
     # ------------------------------------------------------------------

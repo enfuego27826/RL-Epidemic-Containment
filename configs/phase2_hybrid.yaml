@@ -1,0 +1,62 @@
+# Phase 2 Hybrid Action Space (PAMDP) experiment configuration
+# Used by: python scripts/train.py --config configs/phase2_hybrid.yaml
+#
+# This config enables the hybrid actor-critic (discrete + continuous heads)
+# with separate entropy coefficients for each head and action masking.
+
+# ── Environment ────────────────────────────────────────────────────────────────
+env:
+  task_name: "easy_localized_outbreak"   # easy_localized_outbreak | medium_multi_center_spread | hard_asymptomatic_high_density
+  seed: 42
+  max_nodes: 20                          # padding target for variable-graph tasks
+
+# ── PPO Hyperparameters ────────────────────────────────────────────────────────
+ppo:
+  total_timesteps: 200000
+  n_envs: 4                              # number of parallel environment copies
+  n_steps: 64                            # rollout steps per env before update
+  batch_size: 256
+  n_epochs: 4                            # number of passes over the rollout buffer
+  lr: 3.0e-4
+  gamma: 0.99                            # discount factor
+  gae_lambda: 0.95                       # GAE lambda
+  clip_eps: 0.2                          # PPO clip ratio
+  entropy_coef: 0.01                     # fallback if hybrid.enabled is false
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+
+# ── Network Architecture ───────────────────────────────────────────────────────
+model:
+  obs_dim: null                          # inferred from adapter at runtime
+  hidden_dims: [128, 128]
+  activation: "relu"
+
+# ── Phase 2: Hybrid Action Configuration ──────────────────────────────────────
+hybrid:
+  enabled: true                          # set false to fall back to Phase 1 discrete-only
+
+  # Discrete action head
+  num_discrete_actions: 4                # {0: no-op, 1: quarantine, 2: lift, 3: vaccinate}
+
+  # Continuous vaccination head
+  vaccine_budget_handling: "renorm"      # "renorm" (L1 projection) | "clip" (hard cap)
+  min_vaccine_amount: 0.0001             # minimum allocation treated as a real dose
+
+  # Separate entropy coefficients
+  entropy_coef_discrete: 0.01            # coefficient for discrete head entropy
+  entropy_coef_continuous: 0.001         # coefficient for continuous head entropy
+
+  # Action masking
+  masking_enabled: true                  # apply invalid-action masks before sampling
+
+# ── Logging & Checkpointing ────────────────────────────────────────────────────
+logging:
+  log_interval: 10                       # log every N updates
+  checkpoint_dir: "checkpoints/phase2"
+  checkpoint_interval: 50               # save checkpoint every N updates
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  n_episodes: 10
+  deterministic: true
+  checkpoint_path: null                  # override at CLI with --checkpoint

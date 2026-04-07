@@ -7,9 +7,12 @@ Actor head:     trunk → Linear(action_dim)  → raw logits per node-action
 Critic head:    trunk → Linear(1)            → state value
 
 The actor treats each node independently (per-node discrete action), which
-is a simplification that will be replaced by the hybrid head in Phase 2.
+is a simplification replaced by the hybrid head in Phase 2.
 
-TODO (Phase 2): add hybrid head with separate discrete/continuous branches.
+Phase 2 adds ``HybridActorCritic`` with two separate actor heads:
+  - Discrete head: (max_nodes * NUM_DISCRETE_ACTIONS,) logits
+  - Continuous head: (max_nodes,) raw allocation logits (softplus applied later)
+
 TODO (Phase 3): replace MLP trunk with ST-GNN encoder.
 """
 
@@ -203,3 +206,142 @@ class ActorCritic:
             log_probs.append(math.log(max(probs[a], 1e-8)))
 
         return actions, log_probs, value
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Hybrid actor-critic (discrete + continuous heads)
+# ---------------------------------------------------------------------------
+
+class HybridActorCritic:
+    """MLP actor-critic with separate discrete and continuous actor heads.
+
+    Adds a **continuous allocation head** on top of the shared trunk from
+    ``ActorCritic``.  The continuous head outputs one raw logit per node;
+    the ``HybridActionDist`` module applies softplus + budget projection.
+
+    Parameters
+    ----------
+    obs_dim:
+        Dimension of the flat observation vector.
+    action_dim:
+        Number of discrete actions per node (default 4).
+    max_nodes:
+        Maximum nodes.
+    hidden_dims:
+        Widths of shared hidden layers.
+    seed:
+        Weight initialisation seed.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int = 4,
+        max_nodes: int = 20,
+        hidden_dims: Sequence[int] = (128, 128),
+        seed: int = 0,
+    ) -> None:
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.max_nodes = max_nodes
+
+        # Shared trunk
+        self._trunk = MLP(obs_dim, hidden_dims, hidden_dims[-1], seed=seed)
+
+        # Discrete actor head: outputs (max_nodes * action_dim) logits
+        disc_out_dim = max_nodes * action_dim
+        self._discrete_head = MLP(hidden_dims[-1], [], disc_out_dim, seed=seed + 1)
+
+        # Continuous actor head: outputs max_nodes raw logits (one per node)
+        self._continuous_head = MLP(hidden_dims[-1], [], max_nodes, seed=seed + 2)
+
+        # Critic head: scalar value estimate
+        self._critic_head = MLP(hidden_dims[-1], [], 1, seed=seed + 3)
+
+    def forward(
+        self,
+        obs: list[float],
+    ) -> tuple[list[list[float]], list[float], float]:
+        """Compute discrete logits, continuous logits, and state value.
+
+        Parameters
+        ----------
+        obs:
+            Flat observation vector of length ``obs_dim``.
+
+        Returns
+        -------
+        discrete_logits:
+            Shape (max_nodes, action_dim).
+        continuous_logits:
+            Shape (max_nodes,) — raw inputs to softplus/budget projection.
+        value:
+            Scalar critic estimate.
+        """
+        h = self._trunk.forward(obs)
+        flat_disc = self._discrete_head.forward(h)
+        cont_logits = self._continuous_head.forward(h)
+        value = self._critic_head.forward(h)[0]
+
+        discrete_logits = [
+            flat_disc[i * self.action_dim : (i + 1) * self.action_dim]
+            for i in range(self.max_nodes)
+        ]
+        return discrete_logits, cont_logits, value
+
+    def act(
+        self,
+        obs: list[float],
+        mask: list[list[bool]] | None = None,
+        vaccine_budget: float = 1.0,
+        deterministic: bool = False,
+        seed: int | None = None,
+    ) -> tuple[dict[str, list], float, float, float]:
+        """Sample (or greedily select) a hybrid action.
+
+        Parameters
+        ----------
+        obs:
+            Flat observation vector.
+        mask:
+            Per-node action validity mask of shape (max_nodes, action_dim).
+            If None, all actions are valid.
+        vaccine_budget:
+            Current vaccine budget for budget projection.
+        deterministic:
+            If True, use ``mode()``; otherwise ``sample()``.
+        seed:
+            Optional RNG seed forwarded to ``HybridActionDist``.
+
+        Returns
+        -------
+        action_dict:
+            ``{"discrete": list[int], "continuous": list[float]}``.
+        log_prob_discrete:
+            Scalar combined discrete log-probability.
+        log_prob_continuous:
+            Scalar combined continuous log-probability.
+        value:
+            Critic estimate V(obs).
+        """
+        from src.models.hybrid_action import HybridActionDist
+
+        discrete_logits, cont_logits, value = self.forward(obs)
+        dist = HybridActionDist(
+            discrete_logits=discrete_logits,
+            continuous_logits=cont_logits,
+            mask=mask,
+            vaccine_budget=vaccine_budget,
+            seed=seed,
+        )
+
+        if deterministic:
+            sample = dist.mode()
+        else:
+            sample = dist.sample()
+
+        action_dict = {
+            "discrete": sample.discrete,
+            "continuous": sample.continuous,
+        }
+        return action_dict, sample.log_prob_discrete, sample.log_prob_continuous, value
