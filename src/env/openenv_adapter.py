@@ -123,9 +123,13 @@ class OpenEnvAdapter:
         # obs_dim is fixed after the first reset()
         self.obs_dim: int = max_nodes * NODE_FEATURE_DIM + GLOBAL_FEATURE_DIM
 
-        # Phase 2: invalid-action diagnostics accumulated per episode
+        # Phase 2: invalid-action diagnostics accumulated per episode.
+        # _invalid_action_count: total invalid node-decisions across all steps.
+        # _total_decisions: total node-decisions checked (= steps * num_nodes),
+        #   used as denominator so invalid_action_rate is truly in [0, 1].
         self._invalid_action_count: int = 0
         self._total_steps: int = 0
+        self._total_decisions: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,6 +163,7 @@ class OpenEnvAdapter:
         # Reset per-episode diagnostics
         self._invalid_action_count = 0
         self._total_steps = 0
+        self._total_decisions = 0
 
         obs_tensor = self._obs_to_tensor(obs_model)
         info: dict[str, Any] = {
@@ -204,11 +209,12 @@ class OpenEnvAdapter:
         obs_model, reward, done, info = self._env.step(epidemic_action)
         obs_tensor = self._obs_to_tensor(obs_model)
         self._total_steps += 1
+        self._total_decisions += max(self.num_nodes, 1)
         info["node_ids"] = self._node_ids
         info["invalid_action_count"] = self._invalid_action_count
         info["invalid_action_rate"] = (
-            self._invalid_action_count / self._total_steps
-            if self._total_steps > 0 else 0.0
+            self._invalid_action_count / self._total_decisions
+            if self._total_decisions > 0 else 0.0
         )
         return obs_tensor, float(reward), bool(done), info
 
