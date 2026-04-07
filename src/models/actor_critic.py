@@ -287,6 +287,12 @@ class HybridActorCritic(nn.Module):
         Returns Python lists so that ``HybridActionDist`` and the Phase 2
         smoke tests work without modification.
 
+        .. note::
+            This method calls ``_forward_tensor`` under ``torch.no_grad()``
+            and converts results to Python lists.  Callers that need
+            differentiable outputs (e.g. gradient-based training) should
+            call ``_forward_tensor(obs_tensor)`` directly.
+
         Parameters
         ----------
         obs:
