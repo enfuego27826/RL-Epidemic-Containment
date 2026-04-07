@@ -199,7 +199,25 @@ def main() -> None:
 
     checkpoint_path = eval_cfg.get("checkpoint_path")
     if checkpoint_path and os.path.isfile(checkpoint_path):
-        logger.info("Checkpoint file found: %s (weight loading not yet implemented)", checkpoint_path)
+        # Support both plain .pt weights files and legacy .txt metadata files
+        # (which are saved alongside a same-named .pt file).
+        weights_path = checkpoint_path
+        if checkpoint_path.endswith(".txt"):
+            candidate = checkpoint_path[:-4] + ".pt"
+            if os.path.isfile(candidate):
+                weights_path = candidate
+        if weights_path.endswith(".pt"):
+            try:
+                import torch
+                ckpt = torch.load(weights_path, map_location="cpu", weights_only=True)
+                policy.load_state_dict(ckpt["policy_state_dict"])
+                logger.info("Loaded weights from: %s", weights_path)
+            except Exception as exc:
+                logger.warning("Could not load weights from %s: %s", weights_path, exc)
+        else:
+            logger.info(
+                "Checkpoint file found: %s (no .pt weights to load)", checkpoint_path
+            )
     elif checkpoint_path:
         logger.warning("Checkpoint file not found: %s — using random weights.", checkpoint_path)
     else:

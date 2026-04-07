@@ -1,17 +1,23 @@
-"""Minimal MLP actor-critic for the Phase 1 PPO baseline.
+"""MLP actor-critic for the Phase 1 PPO baseline (PyTorch implementation).
 
 Architecture
 ------------
-Shared trunk:   obs → Linear(hidden) → ReLU → Linear(hidden) → ReLU
-Actor head:     trunk → Linear(action_dim)  → raw logits per node-action
-Critic head:    trunk → Linear(1)            → state value
+Shared trunk:   obs → Linear(hidden) → ReLU → … → Linear(hidden) → ReLU
+Actor head:     trunk → Linear(max_nodes * action_dim)  → per-node logits
+Critic head:    trunk → Linear(1)                        → state value
 
-The actor treats each node independently (per-node discrete action), which
-is a simplification replaced by the hybrid head in Phase 2.
+Both ``ActorCritic`` and ``HybridActorCritic`` are ``torch.nn.Module``
+subclasses so that ``torch.optim`` can track all parameters and
+``loss.backward()`` propagates gradients correctly.
 
-Phase 2 adds ``HybridActorCritic`` with two separate actor heads:
-  - Discrete head: (max_nodes * NUM_DISCRETE_ACTIONS,) logits
-  - Continuous head: (max_nodes,) raw allocation logits (softplus applied later)
+Phase 1 (``ActorCritic``):
+    ``forward(obs_tensor)`` returns tensors; ``act()`` wraps it for Python
+    callers that expect plain Python lists.
+
+Phase 2 (``HybridActorCritic``):
+    ``_forward_tensor(obs_tensor)`` returns tensors for gradient computation.
+    ``forward(obs_list)`` wraps it, converting back to Python lists for
+    backward-compatibility with ``HybridActionDist`` and the smoke tests.
 
 TODO (Phase 3): replace MLP trunk with ST-GNN encoder.
 """
@@ -21,77 +27,61 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+import torch
+import torch.nn as nn
 
-def _relu(x: float) -> float:
-    return max(0.0, x)
 
+# ---------------------------------------------------------------------------
+# Kept for backward-compatibility (used by hybrid_action.py and tests)
+# ---------------------------------------------------------------------------
 
 def _softmax(logits: list[float]) -> list[float]:
+    """Numerically stable softmax over a 1-D list (stdlib-only)."""
     max_l = max(logits)
     exps = [math.exp(l - max_l) for l in logits]
     total = sum(exps)
     return [e / total for e in exps]
 
 
-def _linear(
-    x: list[float],
-    weight: list[list[float]],
-    bias: list[float],
-) -> list[float]:
-    """Dense layer: y = x @ W^T + b (no external deps)."""
-    out_dim = len(bias)
-    out = list(bias)
-    for j in range(out_dim):
-        for i, xi in enumerate(x):
-            out[j] += xi * weight[j][i]
-    return out
+# ---------------------------------------------------------------------------
+# Internal helper: build a shared MLP trunk
+# ---------------------------------------------------------------------------
 
+def _build_mlp(
+    in_dim: int,
+    hidden_dims: Sequence[int],
+    out_dim: int,
+) -> nn.Sequential:
+    """Build a fully-connected MLP with ReLU after every layer except the last.
 
-class MLP:
-    """Simple multi-layer perceptron using only the standard library.
-
-    Parameters
-    ----------
-    in_dim:
-        Input feature dimension.
-    hidden_dims:
-        Sequence of hidden layer widths.
-    out_dim:
-        Output dimension.
-    seed:
-        Random seed for weight initialisation (Xavier uniform-style).
+    Matches the original pure-Python MLP architecture:
+        dims = [in_dim, *hidden_dims, out_dim]
+        For each consecutive pair apply Linear; ReLU on all but the last.
     """
-
-    def __init__(
-        self,
-        in_dim: int,
-        hidden_dims: Sequence[int],
-        out_dim: int,
-        seed: int = 0,
-    ) -> None:
-        import random
-
-        rng = random.Random(seed)
-        self._layers: list[tuple[list[list[float]], list[float]]] = []
-        dims = [in_dim, *list(hidden_dims), out_dim]
-        for in_d, out_d in zip(dims[:-1], dims[1:]):
-            limit = math.sqrt(6.0 / (in_d + out_d))
-            W = [[rng.uniform(-limit, limit) for _ in range(in_d)] for _ in range(out_d)]
-            b = [0.0] * out_d
-            self._layers.append((W, b))
-
-    def forward(self, x: list[float]) -> list[float]:
-        """Forward pass; applies ReLU after all but the last layer."""
-        h = list(x)
-        for idx, (W, b) in enumerate(self._layers):
-            h = _linear(h, W, b)
-            if idx < len(self._layers) - 1:
-                h = [_relu(v) for v in h]
-        return h
+    all_dims = [in_dim, *list(hidden_dims), out_dim]
+    layers: list[nn.Module] = []
+    for i, (d_in, d_out) in enumerate(zip(all_dims[:-1], all_dims[1:])):
+        layers.append(nn.Linear(d_in, d_out))
+        if i < len(all_dims) - 2:          # ReLU after every layer except the last
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
 
 
-class ActorCritic:
-    """Shared-trunk MLP actor-critic network.
+def _init_weights(module: nn.Module, seed: int = 0) -> None:
+    """Xavier-uniform init for all ``nn.Linear`` layers."""
+    torch.manual_seed(seed)
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            nn.init.zeros_(m.bias)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Discrete-only actor-critic
+# ---------------------------------------------------------------------------
+
+class ActorCritic(nn.Module):
+    """Shared-trunk MLP actor-critic network (PyTorch).
 
     Parameters
     ----------
@@ -100,7 +90,7 @@ class ActorCritic:
     action_dim:
         Number of discrete actions per node.
     max_nodes:
-        Maximum nodes (sets action head output = max_nodes * action_dim).
+        Maximum nodes (action head outputs ``max_nodes * action_dim`` logits).
     hidden_dims:
         Widths of shared hidden layers.
     seed:
@@ -115,48 +105,47 @@ class ActorCritic:
         hidden_dims: Sequence[int] = (128, 128),
         seed: int = 0,
     ) -> None:
+        super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.max_nodes = max_nodes
 
-        # Shared trunk
-        self._trunk = MLP(obs_dim, hidden_dims, hidden_dims[-1], seed=seed)
+        # Shared trunk: obs → [hidden] → hidden_dims[-1] (no final ReLU)
+        self.trunk = _build_mlp(obs_dim, list(hidden_dims), hidden_dims[-1])
 
-        # Actor: outputs logits for (max_nodes * action_dim) actions
-        actor_out_dim = max_nodes * action_dim
-        self._actor_head = MLP(hidden_dims[-1], [], actor_out_dim, seed=seed + 1)
+        # Actor head: one linear layer on top of the trunk
+        self.actor_head = nn.Linear(hidden_dims[-1], max_nodes * action_dim)
 
-        # Critic: outputs a single state value
-        self._critic_head = MLP(hidden_dims[-1], [], 1, seed=seed + 2)
+        # Critic head: single scalar value
+        self.critic_head = nn.Linear(hidden_dims[-1], 1)
+
+        _init_weights(self, seed)
 
     def forward(
         self,
-        obs: list[float],
-    ) -> tuple[list[list[float]], float]:
+        obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-node action logits and state value.
 
         Parameters
         ----------
         obs:
-            Flat observation vector of length ``obs_dim``.
+            Float tensor of shape ``(obs_dim,)`` or ``(batch, obs_dim)``.
 
         Returns
         -------
         action_logits:
-            Shape (max_nodes, action_dim) — logits for each node's discrete
-            action distribution.
+            Shape ``(..., max_nodes, action_dim)``.
         value:
-            Scalar state-value estimate.
+            Shape ``(..., 1)``.
         """
-        h = self._trunk.forward(obs)
-        flat_logits = self._actor_head.forward(h)
-        value = self._critic_head.forward(h)[0]
-
-        # Reshape flat logits to (max_nodes, action_dim)
-        action_logits = [
-            flat_logits[i * self.action_dim : (i + 1) * self.action_dim]
-            for i in range(self.max_nodes)
-        ]
+        h = self.trunk(obs)
+        flat_logits = self.actor_head(h)
+        value = self.critic_head(h)
+        # Reshape to (..., max_nodes, action_dim)
+        action_logits = flat_logits.view(
+            *flat_logits.shape[:-1], self.max_nodes, self.action_dim
+        )
         return action_logits, value
 
     def act(
@@ -164,12 +153,12 @@ class ActorCritic:
         obs: list[float],
         deterministic: bool = False,
     ) -> tuple[list[int], list[float], float]:
-        """Sample (or greedily select) a per-node action.
+        """Sample (or greedily select) a per-node action without gradients.
 
         Parameters
         ----------
         obs:
-            Flat observation vector.
+            Flat observation vector (Python list).
         deterministic:
             If True, choose the argmax per node; otherwise sample.
 
@@ -180,44 +169,36 @@ class ActorCritic:
         log_probs:
             Per-node log-probabilities of the chosen actions.
         value:
-            Critic estimate V(obs).
+            Scalar critic estimate V(obs).
         """
-        import math
-        import random
+        obs_t = torch.tensor(obs, dtype=torch.float32)
+        with torch.no_grad():
+            action_logits, value_t = self.forward(obs_t)  # (max_nodes, action_dim), (1,)
 
-        action_logits, value = self.forward(obs)
         actions: list[int] = []
         log_probs: list[float] = []
 
-        for logits in action_logits:
-            probs = _softmax(logits)
+        for node_logits in action_logits:          # iterate over max_nodes
+            probs = torch.softmax(node_logits, dim=-1)
             if deterministic:
-                a = max(range(len(probs)), key=lambda i: probs[i])
+                a = int(probs.argmax().item())
             else:
-                r = random.random()
-                cumsum = 0.0
-                a = len(probs) - 1
-                for idx, p in enumerate(probs):
-                    cumsum += p
-                    if r < cumsum:
-                        a = idx
-                        break
+                a = int(torch.multinomial(probs, 1).item())
             actions.append(a)
-            log_probs.append(math.log(max(probs[a], 1e-8)))
+            log_probs.append(math.log(max(probs[a].item(), 1e-8)))
 
-        return actions, log_probs, value
+        return actions, log_probs, value_t.item()
 
 
 # ---------------------------------------------------------------------------
 # Phase 2: Hybrid actor-critic (discrete + continuous heads)
 # ---------------------------------------------------------------------------
 
-class HybridActorCritic:
+class HybridActorCritic(nn.Module):
     """MLP actor-critic with separate discrete and continuous actor heads.
 
-    Adds a **continuous allocation head** on top of the shared trunk from
-    ``ActorCritic``.  The continuous head outputs one raw logit per node;
-    the ``HybridActionDist`` module applies softplus + budget projection.
+    The continuous head outputs one raw logit per node; ``HybridActionDist``
+    applies softplus + budget projection during rollout collection.
 
     Parameters
     ----------
@@ -241,22 +222,61 @@ class HybridActorCritic:
         hidden_dims: Sequence[int] = (128, 128),
         seed: int = 0,
     ) -> None:
+        super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.max_nodes = max_nodes
 
         # Shared trunk
-        self._trunk = MLP(obs_dim, hidden_dims, hidden_dims[-1], seed=seed)
+        self.trunk = _build_mlp(obs_dim, list(hidden_dims), hidden_dims[-1])
 
-        # Discrete actor head: outputs (max_nodes * action_dim) logits
-        disc_out_dim = max_nodes * action_dim
-        self._discrete_head = MLP(hidden_dims[-1], [], disc_out_dim, seed=seed + 1)
+        # Discrete actor head: (max_nodes * action_dim) logits
+        self.discrete_head = nn.Linear(hidden_dims[-1], max_nodes * action_dim)
 
-        # Continuous actor head: outputs max_nodes raw logits (one per node)
-        self._continuous_head = MLP(hidden_dims[-1], [], max_nodes, seed=seed + 2)
+        # Continuous actor head: max_nodes raw logits
+        self.continuous_head = nn.Linear(hidden_dims[-1], max_nodes)
 
-        # Critic head: scalar value estimate
-        self._critic_head = MLP(hidden_dims[-1], [], 1, seed=seed + 3)
+        # Critic head
+        self.critic_head = nn.Linear(hidden_dims[-1], 1)
+
+        _init_weights(self, seed)
+
+    # ------------------------------------------------------------------
+    # Tensor forward (used for gradient computation in update_policy)
+    # ------------------------------------------------------------------
+
+    def _forward_tensor(
+        self,
+        obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Differentiable forward pass returning raw tensors.
+
+        Parameters
+        ----------
+        obs:
+            Float tensor of shape ``(obs_dim,)`` or ``(batch, obs_dim)``.
+
+        Returns
+        -------
+        discrete_logits:
+            Shape ``(..., max_nodes, action_dim)``.
+        continuous_logits:
+            Shape ``(..., max_nodes)``.
+        value:
+            Shape ``(..., 1)``.
+        """
+        h = self.trunk(obs)
+        flat_disc = self.discrete_head(h)
+        cont = self.continuous_head(h)
+        value = self.critic_head(h)
+        disc_logits = flat_disc.view(
+            *flat_disc.shape[:-1], self.max_nodes, self.action_dim
+        )
+        return disc_logits, cont, value
+
+    # ------------------------------------------------------------------
+    # Python-list forward (backward-compat for HybridActionDist + tests)
+    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -264,30 +284,27 @@ class HybridActorCritic:
     ) -> tuple[list[list[float]], list[float], float]:
         """Compute discrete logits, continuous logits, and state value.
 
+        Returns Python lists so that ``HybridActionDist`` and the Phase 2
+        smoke tests work without modification.
+
         Parameters
         ----------
         obs:
-            Flat observation vector of length ``obs_dim``.
+            Flat observation vector (Python list).
 
         Returns
         -------
         discrete_logits:
             Shape (max_nodes, action_dim).
         continuous_logits:
-            Shape (max_nodes,) — raw inputs to softplus/budget projection.
+            Shape (max_nodes,).
         value:
             Scalar critic estimate.
         """
-        h = self._trunk.forward(obs)
-        flat_disc = self._discrete_head.forward(h)
-        cont_logits = self._continuous_head.forward(h)
-        value = self._critic_head.forward(h)[0]
-
-        discrete_logits = [
-            flat_disc[i * self.action_dim : (i + 1) * self.action_dim]
-            for i in range(self.max_nodes)
-        ]
-        return discrete_logits, cont_logits, value
+        obs_t = torch.tensor(obs, dtype=torch.float32)
+        with torch.no_grad():
+            disc_t, cont_t, val_t = self._forward_tensor(obs_t)
+        return disc_t.tolist(), cont_t.tolist(), val_t.item()
 
     def act(
         self,
@@ -304,7 +321,7 @@ class HybridActorCritic:
         obs:
             Flat observation vector.
         mask:
-            Per-node action validity mask of shape (max_nodes, action_dim).
+            Per-node action validity mask (max_nodes, action_dim).
             If None, all actions are valid.
         vaccine_budget:
             Current vaccine budget for budget projection.
