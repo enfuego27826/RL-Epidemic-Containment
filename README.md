@@ -307,6 +307,55 @@ For comparison, a pure no-op policy scores approximately:
 
 These scores are deterministic for the current task definitions and are intended as a sanity-check baseline rather than a ceiling.
 
+## RL Baseline Scaffold
+
+An initial PPO baseline scaffold is included for training RL agents against this environment.
+See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full phased roadmap and
+[`docs/PHASE_1_BASELINE_PLAN.md`](docs/PHASE_1_BASELINE_PLAN.md) for Phase 1 milestones.
+
+### Project Structure
+
+```
+src/
+  env/            # Environment adapter (OpenEnvAdapter)
+  models/         # Actor-critic network architectures
+  train/          # PPO training loop and rollout buffer
+  eval/           # Evaluation utilities
+configs/
+  baseline.yaml   # PPO hyperparameters
+scripts/
+  train.py        # Training entry-point
+  eval.py         # Evaluation entry-point
+```
+
+### Running the Baseline Scaffold
+
+Train with default config:
+
+```bash
+python scripts/train.py --config configs/baseline.yaml
+```
+
+Smoke-test (10 steps, no output files):
+
+```bash
+python scripts/train.py --config configs/baseline.yaml --smoke-test
+```
+
+Evaluate (uses randomly initialised weights until a trained checkpoint is available):
+
+```bash
+python scripts/eval.py --config configs/baseline.yaml --n-episodes 5
+```
+
+Override task or seed at the CLI:
+
+```bash
+python scripts/train.py --config configs/baseline.yaml --task medium_multi_center_spread --seed 1
+```
+
+---
+
 ## OpenEnv Alignment
 
 The server and manifest are aligned to the current OpenEnv interfaces and package layout:

@@ -1,0 +1,41 @@
+# Baseline PPO experiment configuration
+# Used by scripts/train.py and scripts/eval.py
+
+# ── Environment ────────────────────────────────────────────────────────────────
+env:
+  task_name: "easy_localized_outbreak"   # easy_localized_outbreak | medium_multi_center_spread | hard_asymptomatic_high_density
+  seed: 42
+  max_nodes: 20                          # padding target for variable-graph tasks
+
+# ── PPO Hyperparameters ────────────────────────────────────────────────────────
+ppo:
+  total_timesteps: 200000
+  n_envs: 4                              # number of parallel environment copies
+  n_steps: 64                            # rollout steps per env before update
+  batch_size: 256
+  n_epochs: 4                            # number of passes over the rollout buffer
+  lr: 3.0e-4
+  gamma: 0.99                            # discount factor
+  gae_lambda: 0.95                       # GAE lambda
+  clip_eps: 0.2                          # PPO clip ratio
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+
+# ── Network Architecture ───────────────────────────────────────────────────────
+model:
+  obs_dim: null                          # inferred from adapter at runtime
+  hidden_dims: [128, 128]
+  activation: "relu"
+
+# ── Logging & Checkpointing ────────────────────────────────────────────────────
+logging:
+  log_interval: 10                       # log every N updates
+  checkpoint_dir: "checkpoints/baseline"
+  checkpoint_interval: 50               # save checkpoint every N updates
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  n_episodes: 10
+  deterministic: true
+  checkpoint_path: null                  # override at CLI with --checkpoint
