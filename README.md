@@ -1,53 +1,343 @@
-# Epidemic Containment Strategy
+# RL Epidemic Containment
 
-Epidemic Containment Strategy is an OpenEnv benchmark where an agent acts like a public-health command center. It must contain an outbreak on a travel graph while preserving economic activity, operating under hidden transmission rates and, in the hardest task, lagged infection reporting.
+Reinforcement-learning agent for the **Epidemic Containment Strategy** [OpenEnv](https://github.com/openenv) benchmark. The agent acts as a public-health command centre that must contain an outbreak on a travel graph while preserving economic activity — with hidden transmission rates and (optionally) lagged infection reports.
 
-The environment is designed to feel operational rather than toy-like: quarantine shuts down inter-city transmission but drains local economies, vaccination consumes a finite budget, and the agent is judged on both short-horizon control and end-of-episode outcomes.
+---
+
+## Prerequisites
+
+| Requirement | Version |
+|---|---|
+| Python | 3.10+ |
+| pip | latest |
+
+No GPU is required. All core modules run on CPU with the Python standard library.
+
+---
+
+## Install
+
+```bash
+# Clone the repo
+git clone https://github.com/enfuego27826/RL-Epidemic-Containment.git
+cd RL-Epidemic-Containment
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Optional: install PyYAML for config support (strongly recommended)
+pip install pyyaml
+```
+
+`requirements.txt` includes `openenv-core`, `openai`, `fastapi`, `uvicorn`, and `pydantic`. All RL components use the Python standard library (no PyTorch dependency).
+
+---
+
+## Quick Start
+
+### Smoke Test (< 5 seconds)
+```bash
+python scripts/train.py --config configs/baseline.yaml --smoke-test
+```
+
+### Run Inference (one episode)
+```bash
+python scripts/inference.py --config configs/baseline.yaml --task easy
+```
+
+### Evaluate Policy
+```bash
+python scripts/eval.py --config configs/baseline.yaml
+```
+
+---
+
+## Training
+
+### Phase 1 — Baseline MLP PPO
+```bash
+python scripts/train.py --config configs/baseline.yaml
+```
+
+### Phase 2 — Hybrid Action Space (discrete + continuous vaccination)
+```bash
+python scripts/train.py --config configs/phase2_hybrid.yaml
+```
+
+### Phase 3 — Spatiotemporal GNN Encoder
+```bash
+python scripts/train.py --config configs/phase3_stgnn.yaml
+```
+
+### Phase 4 — Delayed Observations / Belief State
+```bash
+python scripts/train.py --config configs/phase4_delayed.yaml
+```
+
+### Phase 6 — Multi-objective RL
+```bash
+python scripts/train.py --config configs/phase6_morl.yaml
+```
+
+### Full Pipeline (Phases 3–6 combined)
+```bash
+python scripts/train.py --config configs/full_pipeline.yaml
+```
+
+#### Common CLI overrides
+```bash
+python scripts/train.py --config configs/baseline.yaml \
+    --seed 1 \
+    --task hard_asymptomatic_high_density \
+    --smoke-test
+```
+
+---
+
+## Evaluation
+
+### Single task evaluation
+```bash
+python scripts/eval.py --config configs/baseline.yaml
+python scripts/eval.py --config configs/baseline.yaml --task hard --n-episodes 5
+```
+
+### Robustness / generalization harness (Phase 7)
+```bash
+# All three tasks × 3 seeds × 3 episodes
+python scripts/run_eval_harness.py --config configs/full_pipeline.yaml
+
+# Specific tasks and seeds
+python scripts/run_eval_harness.py --config configs/baseline.yaml \
+    --tasks easy medium hard \
+    --seeds 0 1 2 \
+    --n-episodes 5
+
+# Save results to file
+python scripts/run_eval_harness.py --config configs/baseline.yaml \
+    --output results/eval.json
+python scripts/run_eval_harness.py --config configs/baseline.yaml \
+    --output results/eval.csv
+```
+
+---
+
+## Inference
+
+Run a trained checkpoint on one episode with step-by-step output:
+
+```bash
+python scripts/inference.py --config configs/baseline.yaml --task easy
+python scripts/inference.py --config configs/baseline.yaml --task hard --seed 7
+python scripts/inference.py --config configs/baseline.yaml \
+    --checkpoint checkpoints/baseline/checkpoint_final.txt
+```
+
+---
+
+## Tasks
+
+| Shorthand | Full name | Description |
+|---|---|---|
+| `easy` | `easy_localized_outbreak` | Single cluster, low density |
+| `medium` | `medium_multi_center_spread` | Multi-city spread |
+| `hard` | `hard_asymptomatic_high_density` | Lagged reporting, high density |
+
+---
+
+## Config Overview
+
+All configs live in `configs/`. Key sections:
+
+```yaml
+env:
+  task_name: "easy_localized_outbreak"  # task to train on
+  seed: 42
+  max_nodes: 20                          # node padding target
+
+ppo:
+  total_timesteps: 200000
+  n_steps: 64
+  lr: 3.0e-4
+  gamma: 0.99
+  clip_eps: 0.2
+
+model:
+  policy_type: "baseline"  # baseline | hybrid | st
+  hidden_dims: [128, 128]
+  # Phase 3 ST-GNN options:
+  gcn_hidden_dim: 32
+  gru_hidden_dim: 32
+  global_context_dim: 32
+
+hybrid:                    # Phase 2 — hybrid action space
+  enabled: true
+  entropy_coef_discrete: 0.01
+  entropy_coef_continuous: 0.001
+
+lag:                       # Phase 4 — delayed observations
+  steps: 2
+  history_len: 4
+  mode: "concat"           # "concat" | "mean"
+
+system_id:                 # Phase 5 — online system identification
+  enabled: true
+  window_size: 8
+
+morl:                      # Phase 6 — multi-objective RL
+  weights:
+    health: 0.5
+    economy: 0.3
+    control: 0.1
+    penalty: 0.1
+
+eval:
+  tasks: [easy_localized_outbreak, medium_multi_center_spread, hard_asymptomatic_high_density]
+  seeds: [42, 43, 44]
+  n_episodes: 5
+  deterministic: true
+```
+
+### Config files
+
+| File | Description |
+|---|---|
+| `configs/baseline.yaml` | Phase 1 MLP baseline |
+| `configs/phase2_hybrid.yaml` | Phase 2 hybrid actions |
+| `configs/phase3_stgnn.yaml` | Phase 3 ST-GNN encoder |
+| `configs/phase4_delayed.yaml` | Phase 4 delayed observations |
+| `configs/phase6_morl.yaml` | Phase 6 multi-objective RL |
+| `configs/full_pipeline.yaml` | All phases combined |
+
+---
+
+## Expected Outputs
+
+After training, checkpoints are saved to the directory specified in `logging.checkpoint_dir`:
+
+```
+checkpoints/
+  baseline/
+    checkpoint_final.txt    # training summary
+  phase2/
+    checkpoint_final.txt
+  ...
+```
+
+The eval harness outputs a summary table:
+
+```
+================================================================================
+                               EVALUATION SUMMARY
+================================================================================
+Task                                   N    Return  Peak Inf   Economy   Inv%
+--------------------------------------------------------------------------------
+easy_localized_outbreak                3    -3.72±0.1   0.40±0.05   0.86±0.01   0.0
+medium_multi_center_spread             3    -8.14±0.3   0.61±0.08   0.74±0.02   0.2
+hard_asymptomatic_high_density         3   -12.6±0.5   0.75±0.12   0.62±0.03   0.4
+================================================================================
+```
+
+---
+
+## Repository Structure
+
+```
+├── configs/                # experiment configs
+│   ├── baseline.yaml
+│   ├── phase2_hybrid.yaml
+│   ├── phase3_stgnn.yaml
+│   ├── phase4_delayed.yaml
+│   ├── phase6_morl.yaml
+│   └── full_pipeline.yaml
+├── scripts/
+│   ├── train.py            # training entry-point
+│   ├── eval.py             # evaluation entry-point
+│   ├── inference.py        # run one episode
+│   └── run_eval_harness.py # multi-task/seed evaluation
+├── src/
+│   ├── env/
+│   │   ├── openenv_adapter.py    # env wrapper + normalisation
+│   │   ├── action_masking.py     # invalid-action masks
+│   │   └── belief_state.py       # Phase 4: lag + history buffer
+│   ├── models/
+│   │   ├── actor_critic.py       # Phase 1/2 MLP actor-critic
+│   │   ├── hybrid_action.py      # Phase 2 hybrid action dist
+│   │   └── st_encoder.py         # Phase 3 ST-GNN + GRU encoder
+│   ├── system_id/
+│   │   └── estimator.py          # Phase 5 rolling beta/gamma estimator
+│   ├── train/
+│   │   ├── ppo_baseline.py       # Phase 1/2 PPO training loop
+│   │   └── ppo_morl.py           # Phase 6 multi-objective PPO
+│   ├── eval/
+│   │   └── scenario_runner.py    # Phase 7 evaluation harness
+│   └── tests/
+│       ├── smoke_phase2.py       # Phase 2 smoke tests
+│       └── smoke_phases3to8.py   # Phases 3–8 smoke tests
+├── env.py                  # EpidemicContainmentStrategyEnv
+├── engine.py               # GraphEpidemicEngine (SIR dynamics)
+├── models.py               # Pydantic observation/action models
+├── tasks.py                # task definitions and grading
+└── requirements.txt
+```
+
+---
+
+## Running Tests
+
+```bash
+# Phase 2 smoke tests
+python src/tests/smoke_phase2.py
+
+# Phases 3–8 smoke tests
+python src/tests/smoke_phases3to8.py
+```
+
+Both scripts exit with code 0 on success and print `[PASS]` / `[FAIL]` per check.
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| `ModuleNotFoundError: No module named 'openenv'` | Run `pip install openenv-core` |
+| `ModuleNotFoundError: No module named 'yaml'` | Run `pip install pyyaml` |
+| `AssertionError: Episode already completed` | The env was stepped after `done=True`; call `reset()` first |
+| Low economy scores | Increase `morl.weights.economy` in the config |
+| High invalid action rate | Ensure `hybrid.masking_enabled: true` in config |
+| Training is slow | Reduce `ppo.total_timesteps` or use `--smoke-test` |
+| Checkpoint not found warning | Pass `--checkpoint path/to/checkpoint.txt` or set `eval.checkpoint_path` in config |
+
+---
 
 ## Mathematical Model
 
-Each city node tracks:
+Each node tracks compartments S (susceptible), I (infected), R (recovered) and economic health:
 
-- `S`: susceptible population
-- `I`: infected population
-- `R`: recovered / immune population
-- `economic_health`: local economy score in `[0, 1]`
-
-At each step, infections evolve with a graph-coupled SIR update:
-
-```text
-lambda_i = beta_i * (I_i / N_i) + sum_j(edge_beta_ji * (I_j / N_j))
-new_infections_i = S_i * (1 - exp(-lambda_i))
-recoveries_i = gamma_i * I_i
+```
+lambda_i = beta_i * (I_i / N_i) + Σ_j(beta_ji * I_j / N_j)
+new_infections_i = S_i * (1 − exp(−lambda_i))
+recoveries_i     = gamma_i * I_i
 ```
 
-Quarantine sets edge transmission involving that node to zero for the step, while vaccination moves people from `S` to `R` subject to budget. Non-quarantined cities recover economically over time, while infected or quarantined cities lose economic health.
+Quarantine zeroes cross-node transmission from node *i*. Vaccination moves *S → R* subject to a finite budget. The reward balances infection control against economic preservation.
 
-## Observation Space
+---
 
-`EpidemicObservation` is a strict Pydantic model with:
+## Implementation Phases
 
-- `benchmark`
-- `task_name`
-- `difficulty`
-- `goal`
-- `step_count`
-- `max_steps`
-- `reporting_lag_steps`
-- `vaccine_budget`
-- `global_economic_score`
-- `reported_total_infection_rate`
-- `nodes[]`
+| Phase | Component | Status |
+|---|---|---|
+| 1 | MLP baseline PPO | ✅ |
+| 2 | Hybrid action space (PAMDP) | ✅ |
+| 3 | Spatiotemporal GNN encoder | ✅ |
+| 4 | Delayed observations / belief state | ✅ |
+| 5 | Online system identification | ✅ |
+| 6 | Multi-objective RL stabilization | ✅ |
+| 7 | Robustness / generalization evaluation | ✅ |
+| 8 | Packaging, scripts, docs | ✅ |
 
-Each `nodes[]` item contains:
-
-- `node_id`
-- `population`
-- `known_infection_rate`
-- `economic_health`
-- `is_quarantined`
-
-The agent sees graph topology through task metadata and prompts, but edge transmission rates remain hidden and are only exposed through `state()`.
 
 ## Action Space
 
