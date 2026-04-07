@@ -12,7 +12,7 @@ build/
 # Virtual environments
 .venv/
 venv/
-env/
+/env/
 
 # Training artifacts
 checkpoints/
@@ -34,3 +34,4 @@ runs/
 # OS
 .DS_Store
 Thumbs.db
+__pycache__/
