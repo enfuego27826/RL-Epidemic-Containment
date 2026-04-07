@@ -38,6 +38,9 @@ ACTION_LIFT: int = 2
 ACTION_VACCINATE: int = 3
 NUM_DISCRETE_ACTIONS: int = 4
 
+# Minimum log-probability clamp to avoid extreme values in the continuous head
+_MIN_LOG_PROB: float = -1e6
+
 
 # ---------------------------------------------------------------------------
 # Low-level math helpers (stdlib only)
@@ -330,7 +333,7 @@ class HybridActionDist:
         for v in alloc:
             lp += math.log(max(v / budget, 1e-8))
         # Clamp to avoid extreme values
-        return max(lp, -1e6)
+        return max(lp, _MIN_LOG_PROB)
 
     # ------------------------------------------------------------------
     # Entropy

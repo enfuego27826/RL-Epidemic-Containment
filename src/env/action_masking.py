@@ -33,6 +33,14 @@ ACTION_LIFT: int = 2
 ACTION_VACCINATE: int = 3
 NUM_DISCRETE_ACTIONS: int = 4
 
+# Human-readable names for action codes (used in validation messages)
+ACTION_NAMES: dict[int, str] = {
+    ACTION_NOOP: "no-op",
+    ACTION_QUARANTINE: "quarantine",
+    ACTION_LIFT: "lift",
+    ACTION_VACCINATE: "vaccinate",
+}
+
 # Observation tensor layout per node (must match openenv_adapter.NODE_FEATURE_DIM)
 _NODE_FEATURE_DIM: int = 4
 _QUARANTINE_SLOT: int = 2  # index within the per-node feature block
@@ -197,7 +205,7 @@ def validate_hybrid_action(
             violations.append(f"node {i}: action code {act} out of range")
             continue
         if not mask[i][act]:
-            action_name = {0: "no-op", 1: "quarantine", 2: "lift", 3: "vaccinate"}[act]
+            action_name = ACTION_NAMES.get(act, str(act))
             violations.append(f"node {i}: action '{action_name}' masked as invalid")
 
     # Check continuous allocation non-negativity

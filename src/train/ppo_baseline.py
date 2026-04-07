@@ -65,7 +65,7 @@ class RolloutBuffer:
     dones: list[bool] = field(default_factory=list)
     values: list[float] = field(default_factory=list)
 
-    # Phase 2 fields (unused in phase 1, populated in phase 2)
+    # Phase 2 fields (empty in phase 1, populated in phase 2)
     log_probs_discrete: list[float] = field(default_factory=list)
     log_probs_continuous: list[float] = field(default_factory=list)
 
