@@ -1,31 +1,22 @@
 """PPO baseline training loop for the epidemic containment environment.
 
-This module implements a minimal, stdlib-only PPO scaffold.  All math is
-performed with plain Python (no NumPy/PyTorch required) so that the smoke
-test runs anywhere.  A real training run will swap the ``ActorCritic``
-implementation for a PyTorch version in Phase 3.
-
 Training loop sketch
 --------------------
-1. ``collect_rollout()`` — run the policy in the env for N steps, storing
+1. ``_collect_rollout()`` — run the policy for ``n_steps``, storing
    transitions in a ``RolloutBuffer``.
-2. ``compute_advantages()`` — compute GAE-lambda returns (placeholder: uses
-   simple discounted returns until the value head is properly wired).
-3. ``optimize()`` — run ``n_epochs`` passes over mini-batches, computing PPO
-   policy-gradient + value + entropy losses and updating parameters.
+2. ``compute_advantages()`` — compute GAE-λ advantages and discounted returns.
+3. ``update_policy()`` — run ``n_epochs`` passes over mini-batches:
+   - compute PPO clipped-surrogate + value + entropy losses as PyTorch tensors,
+   - call ``loss.backward()`` + ``optimizer.step()`` to update parameters.
 4. Repeat until ``total_timesteps`` is reached.
 
-Phase 2 changes
----------------
-- When ``config["phase"] == 2`` (or ``config["hybrid"]["enabled"] == True``),
-  the loop uses ``HybridActorCritic`` and stores combined log-probs.
-- The PPO objective is extended with separate entropy coefficients for the
-  discrete and continuous heads.
-- ``RolloutBuffer`` stores ``log_probs_discrete`` and ``log_probs_continuous``
-  in addition to the combined scalar.
+Phase 1 (baseline): per-node Categorical actor, shared MLP trunk.
+Phase 2 (hybrid):   discrete PPO objective; continuous head receives indirect
+                    gradients through the shared trunk.  Full continuous policy
+                    gradient support is a TODO (Phase 3 PyTorch port).
 
-TODO (Phase 3): wire ST-GNN encoder into ActorCritic.forward().
-TODO: replace pure-Python parameter updates with PyTorch autograd.
+Diagnostic metrics logged every ``log_interval`` updates:
+    policy_loss, value_loss, entropy, clip_frac, approx_kl
 """
 
 from __future__ import annotations
@@ -37,6 +28,9 @@ import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+import torch
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +118,7 @@ class PPOBaseline:
         self.entropy_coef: float = float(ppo_cfg["entropy_coef"])
         self.value_loss_coef: float = float(ppo_cfg["value_loss_coef"])
         self.lr: float = float(ppo_cfg["lr"])
+        self.max_grad_norm: float = float(ppo_cfg.get("max_grad_norm", 0.5))
 
         self.log_interval: int = int(config.get("logging", {}).get("log_interval", 10))
         self.checkpoint_dir: str = config.get("logging", {}).get(
@@ -183,6 +178,9 @@ class PPOBaseline:
         self._global_step: int = 0
         self._n_updates: int = 0
 
+        # Adam optimizer — initialised after the policy is constructed above
+        self._optimizer = torch.optim.Adam(self._policy.parameters(), lr=self.lr)
+
     def train(self) -> None:
         """Run the full PPO training loop until ``total_timesteps``."""
         self._set_seeds(self.seed)
@@ -212,13 +210,16 @@ class PPOBaseline:
                 fps = self._global_step / max(elapsed, 1e-8)
                 logger.info(
                     "update=%d  step=%d  fps=%.0f  "
-                    "policy_loss=%.4f  value_loss=%.4f  entropy=%.4f",
+                    "policy_loss=%.4f  value_loss=%.4f  entropy=%.4f  "
+                    "clip_frac=%.3f  approx_kl=%.4f",
                     self._n_updates,
                     self._global_step,
                     fps,
                     metrics["policy_loss"],
                     metrics["value_loss"],
                     metrics["entropy"],
+                    metrics.get("clip_frac", 0.0),
+                    metrics.get("approx_kl", 0.0),
                 )
 
             # ── Checkpoint ──────────────────────────────────────────────
@@ -349,182 +350,189 @@ class PPOBaseline:
         self._buffer.returns = returns
 
     # ------------------------------------------------------------------
-    # Optimisation step (pure-Python placeholder)
+    # Optimisation step (PyTorch)
     # ------------------------------------------------------------------
 
     def update_policy(self) -> dict[str, float]:
-        """Run ``n_epochs`` passes over the rollout buffer.
+        """Run ``n_epochs`` passes over the rollout buffer with real gradient updates.
 
-        This is a *placeholder* that computes PPO losses conceptually but
-        does not perform real gradient updates (no PyTorch).  Replace with
-        a proper autograd backward pass in the PyTorch refactor.
+        For Phase 1 (discrete-only):
+            Per-node Categorical distributions; PPO ratio computed per
+            (step, node) pair so the clipping is applied correctly.
+
+        For Phase 2 (hybrid):
+            PPO ratio based on the discrete head only (full continuous
+            policy-gradient support is a TODO for the Phase 3 PyTorch port).
+            The continuous head receives indirect gradients through the shared
+            trunk via both the discrete policy loss and the value loss.
 
         Returns
         -------
         metrics:
-            Dict with ``policy_loss``, ``value_loss``, ``entropy``.
+            Dict with ``policy_loss``, ``value_loss``, ``entropy``,
+            ``clip_frac``, ``approx_kl``.
         """
         T = len(self._buffer)
         indices = list(range(T))
 
+        # ── Convert rollout buffer to tensors ─────────────────────────────
+        obs_t = torch.tensor(self._buffer.obs, dtype=torch.float32)          # (T, obs_dim)
+        adv_t = torch.tensor(self._buffer.advantages, dtype=torch.float32)   # (T,)
+        ret_t = torch.tensor(self._buffer.returns, dtype=torch.float32)      # (T,)
+
+        if self.hybrid_mode:
+            # Phase 2: discrete actions extracted from action dicts;
+            # old log-probs use discrete-only component for stable ratio.
+            actions_t = torch.tensor(
+                [a["discrete"] for a in self._buffer.actions], dtype=torch.long
+            )  # (T, max_nodes)
+            old_lp_t = torch.tensor(
+                self._buffer.log_probs_discrete, dtype=torch.float32
+            )  # (T,) — combined discrete log-prob per step
+        else:
+            # Phase 1: list[int] actions, list[float] per-node log-probs
+            actions_t = torch.tensor(
+                self._buffer.actions, dtype=torch.long
+            )  # (T, max_nodes)
+            old_lp_t = torch.tensor(
+                self._buffer.log_probs, dtype=torch.float32
+            )  # (T, max_nodes)
+
+        # ── Diagnostic accumulators ────────────────────────────────────────
         total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy = 0.0
+        total_value_loss  = 0.0
+        total_entropy     = 0.0
+        total_clip_frac   = 0.0
+        total_approx_kl   = 0.0
         n_batches = 0
+
+        clip_eps = self.clip_eps
 
         for _ in range(self.n_epochs):
             random.shuffle(indices)
             for start in range(0, T, self.batch_size):
-                batch_idx = indices[start : start + self.batch_size]
+                b_idx = indices[start : start + self.batch_size]
+                if not b_idx:
+                    continue
+                b_idx_t = torch.tensor(b_idx, dtype=torch.long)
 
-                pl, vl, ent = self._compute_losses(batch_idx)
-                total_policy_loss += pl
-                total_value_loss += vl
-                total_entropy += ent
-                n_batches += 1
+                b_obs     = obs_t[b_idx_t]      # (B, obs_dim)
+                b_adv     = adv_t[b_idx_t]      # (B,)
+                b_ret     = ret_t[b_idx_t]      # (B,)
+                b_actions = actions_t[b_idx_t]  # (B, max_nodes)
 
-                # TODO: call optimizer.step() here after PyTorch port
+                self._optimizer.zero_grad()
+
+                if self.hybrid_mode:
+                    # ── Phase 2: discrete-head PPO ─────────────────────────
+                    disc_logits_t, _cont_logits_t, values_t = \
+                        self._policy._forward_tensor(b_obs)
+                    # (B, max_nodes, action_dim), (B, max_nodes), (B, 1)
+
+                    log_probs_t = torch.log_softmax(disc_logits_t, dim=-1)  # (B, max_nodes, action_dim)
+                    new_lp_node = log_probs_t.gather(
+                        -1, b_actions.unsqueeze(-1)
+                    ).squeeze(-1)               # (B, max_nodes)
+                    new_lp = new_lp_node.sum(dim=-1)  # (B,) combined discrete log-prob
+
+                    b_old_lp = old_lp_t[b_idx_t]     # (B,) combined discrete log-prob
+                    ratio    = torch.exp(new_lp - b_old_lp)  # (B,)
+
+                    surr1 = ratio * b_adv
+                    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * b_adv
+                    policy_loss = -torch.min(surr1, surr2).mean()
+
+                    probs_t = torch.softmax(disc_logits_t, dim=-1)
+                    entropy = -(probs_t * log_probs_t).sum(dim=-1).mean()
+
+                    with torch.no_grad():
+                        clip_frac  = ((ratio - 1.0).abs() > clip_eps).float().mean().item()
+                        approx_kl  = (b_old_lp - new_lp).mean().item()
+
+                else:
+                    # ── Phase 1: per-node Categorical PPO ─────────────────
+                    logits_t, values_t = self._policy.forward(b_obs)
+                    # (B, max_nodes, action_dim), (B, 1)
+
+                    log_probs_t = torch.log_softmax(logits_t, dim=-1)    # (B, max_nodes, action_dim)
+                    new_lp_node = log_probs_t.gather(
+                        -1, b_actions.unsqueeze(-1)
+                    ).squeeze(-1)                                          # (B, max_nodes)
+
+                    b_old_lp   = old_lp_t[b_idx_t]                        # (B, max_nodes)
+                    ratio_node = torch.exp(new_lp_node - b_old_lp)        # (B, max_nodes)
+
+                    # Expand advantage for per-node comparison
+                    adv_exp  = b_adv.unsqueeze(-1)                         # (B, 1)
+                    surr1    = ratio_node * adv_exp
+                    surr2    = torch.clamp(ratio_node, 1.0 - clip_eps, 1.0 + clip_eps) * adv_exp
+                    policy_loss = -torch.min(surr1, surr2).mean()
+
+                    probs_t = torch.softmax(logits_t, dim=-1)
+                    entropy = -(probs_t * log_probs_t).sum(dim=-1).mean()
+
+                    with torch.no_grad():
+                        clip_frac = ((ratio_node - 1.0).abs() > clip_eps).float().mean().item()
+                        approx_kl = (b_old_lp - new_lp_node).mean().item()
+
+                # ── Value loss (shared between both modes) ─────────────────
+                value_loss = 0.5 * (values_t.squeeze(-1) - b_ret).pow(2).mean()
+
+                # ── Combined loss and parameter update ─────────────────────
+                loss = (
+                    policy_loss
+                    + self.value_loss_coef * value_loss
+                    - self.entropy_coef * entropy
+                )
+                loss.backward()
+                nn.utils.clip_grad_norm_(self._policy.parameters(), self.max_grad_norm)
+                self._optimizer.step()
+
+                total_policy_loss += policy_loss.item()
+                total_value_loss  += value_loss.item()
+                total_entropy     += entropy.item()
+                total_clip_frac   += clip_frac
+                total_approx_kl   += approx_kl
+                n_batches         += 1
 
         n_batches = max(n_batches, 1)
         return {
             "policy_loss": total_policy_loss / n_batches,
-            "value_loss": total_value_loss / n_batches,
-            "entropy": total_entropy / n_batches,
+            "value_loss":  total_value_loss  / n_batches,
+            "entropy":     total_entropy     / n_batches,
+            "clip_frac":   total_clip_frac   / n_batches,
+            "approx_kl":   total_approx_kl   / n_batches,
         }
-
-    def _compute_losses(
-        self, batch_idx: list[int]
-    ) -> tuple[float, float, float]:
-        """Compute PPO losses for a mini-batch.
-
-        Supports both Phase 1 (discrete-only) and Phase 2 (hybrid) modes.
-
-        In Phase 2, the PPO ratio uses the combined log-prob (discrete +
-        continuous), and entropy is computed separately for each head with
-        individual coefficients ``entropy_coef_discrete`` and
-        ``entropy_coef_continuous``.
-
-        Parameters
-        ----------
-        batch_idx:
-            Indices into the rollout buffer for this mini-batch.
-
-        Returns
-        -------
-        policy_loss, value_loss, entropy:
-            Scalar loss values.
-        """
-        policy_loss = 0.0
-        value_loss = 0.0
-        entropy = 0.0
-
-        for idx in batch_idx:
-            obs = self._buffer.obs[idx]
-            adv = self._buffer.advantages[idx]
-            ret = self._buffer.returns[idx]
-
-            if self.hybrid_mode:
-                # ── Phase 2: hybrid PPO losses ───────────────────────────
-                action_dict = self._buffer.actions[idx]
-                old_lp = float(self._buffer.log_probs[idx])  # combined scalar
-
-                from src.env.action_masking import build_mask
-                from src.models.hybrid_action import HybridActionDist
-
-                mask = build_mask(
-                    obs_tensor=obs,
-                    max_nodes=self.max_nodes,
-                    num_active_nodes=self._adapter.num_nodes,
-                )
-                vax_budget = self._adapter.vaccine_budget
-                discrete_logits, cont_logits, value = self._policy.forward(obs)
-
-                dist = HybridActionDist(
-                    discrete_logits=discrete_logits,
-                    continuous_logits=cont_logits,
-                    mask=mask,
-                    vaccine_budget=vax_budget,
-                )
-
-                _, _, new_lp = dist.log_prob(
-                    discrete=action_dict["discrete"],
-                    continuous=action_dict["continuous"],
-                )
-
-                ratio = math.exp(new_lp - old_lp)
-                clipped_ratio = max(
-                    min(ratio, 1.0 + self.clip_eps), 1.0 - self.clip_eps
-                )
-                policy_loss -= min(ratio * adv, clipped_ratio * adv)
-
-                ent_disc, ent_cont = dist.entropy()
-                entropy += (
-                    self.entropy_coef_discrete * ent_disc
-                    + self.entropy_coef_continuous * ent_cont
-                )
-
-            else:
-                # ── Phase 1: discrete-only PPO losses ───────────────────
-                old_log_probs = self._buffer.log_probs[idx]  # list[float] per node
-                action_logits, value = self._policy.forward(obs)
-
-                from src.models.actor_critic import _softmax
-
-                for node_i, (logits, old_lp, act) in enumerate(
-                    zip(action_logits, old_log_probs, self._buffer.actions[idx])
-                ):
-                    probs = _softmax(logits)
-                    new_lp = math.log(max(probs[act], 1e-8))
-
-                    ratio = math.exp(new_lp - old_lp)
-                    clipped_ratio = max(
-                        min(ratio, 1.0 + self.clip_eps), 1.0 - self.clip_eps
-                    )
-                    policy_loss -= min(ratio * adv, clipped_ratio * adv)
-
-                    ent_node = -sum(p * math.log(max(p, 1e-8)) for p in probs)
-                    entropy += ent_node
-
-            # Value loss (clipped) — same for both modes
-            value_loss += (value - ret) ** 2
-
-        n = max(len(batch_idx), 1)
-        policy_loss /= n
-        value_loss = 0.5 * value_loss / n
-        entropy /= n
-
-        if not self.hybrid_mode:
-            # Phase 1 uses a single entropy_coef; entropy already summed
-            total_loss = (
-                policy_loss
-                + self.value_loss_coef * value_loss
-                - self.entropy_coef * entropy
-            )
-        else:
-            # Phase 2 entropy coefficients already applied above
-            total_loss = policy_loss + self.value_loss_coef * value_loss - entropy
-
-        return policy_loss, value_loss, entropy
 
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
 
     def _save_checkpoint(self, final: bool = False) -> None:
-        """Persist a lightweight checkpoint (config + metadata).
-
-        A full checkpoint would also serialise model weights.  For this
-        scaffold we just write metadata to avoid external deps.
-        """
+        """Persist a checkpoint: metadata text file + PyTorch weights file."""
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         tag = "final" if final else f"step_{self._global_step}"
-        path = os.path.join(self.checkpoint_dir, f"checkpoint_{tag}.txt")
-        with open(path, "w") as f:
+
+        # Human-readable metadata
+        meta_path = os.path.join(self.checkpoint_dir, f"checkpoint_{tag}.txt")
+        with open(meta_path, "w") as f:
             f.write(f"global_step={self._global_step}\n")
             f.write(f"n_updates={self._n_updates}\n")
             f.write(f"task={self.task_name}\n")
             f.write(f"seed={self.seed}\n")
-        logger.info("Checkpoint saved: %s", path)
+
+        # PyTorch weights (policy + optimizer state)
+        weights_path = os.path.join(self.checkpoint_dir, f"checkpoint_{tag}.pt")
+        torch.save(
+            {
+                "global_step": self._global_step,
+                "n_updates": self._n_updates,
+                "policy_state_dict": self._policy.state_dict(),
+                "optimizer_state_dict": self._optimizer.state_dict(),
+            },
+            weights_path,
+        )
+        logger.info("Checkpoint saved: %s  (weights: %s)", meta_path, weights_path)
 
     @staticmethod
     def _setup_logging() -> None:
