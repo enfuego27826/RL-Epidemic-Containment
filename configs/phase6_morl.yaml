@@ -1,0 +1,57 @@
+# Phase 6 — Multi-objective RL stabilization configuration
+# Enables reward decomposition, scalarization controls, and dual entropy.
+# Used by: python scripts/train.py --config configs/phase6_morl.yaml
+
+# ── Environment ────────────────────────────────────────────────────────────────
+env:
+  task_name: "medium_multi_center_spread"
+  seed: 42
+  max_nodes: 20
+
+# ── PPO Hyperparameters ────────────────────────────────────────────────────────
+ppo:
+  total_timesteps: 200000
+  n_envs: 1
+  n_steps: 64
+  batch_size: 256
+  n_epochs: 4
+  lr: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+
+# ── Network Architecture ───────────────────────────────────────────────────────
+model:
+  policy_type: "hybrid"
+  hidden_dims: [128, 128]
+
+# ── Phase 6: Multi-objective RL ───────────────────────────────────────────────
+morl:
+  weights:
+    health: 0.5          # weight on health-improvement reward
+    economy: 0.3         # weight on economy-preservation reward
+    control: 0.1         # weight on quarantine/vaccine efficiency
+    penalty: 0.1         # weight on penalty terms
+  dual_value_heads: false  # set true to enable dual critic (health + economy)
+  entropy_coef_discrete: 0.01
+  entropy_coef_continuous: 0.001
+
+# ── Logging & Checkpointing ────────────────────────────────────────────────────
+logging:
+  log_interval: 10
+  checkpoint_dir: "checkpoints/phase6"
+  checkpoint_interval: 50
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  n_episodes: 10
+  deterministic: true
+  checkpoint_path: null
+  tasks:
+    - "easy_localized_outbreak"
+    - "medium_multi_center_spread"
+    - "hard_asymptomatic_high_density"
+  seeds: [42, 43, 44]

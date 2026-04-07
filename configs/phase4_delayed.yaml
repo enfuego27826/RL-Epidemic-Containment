@@ -1,0 +1,60 @@
+# Phase 4 — Delayed Observation / Belief State configuration
+# Enables lag-aware observation handling with history buffering.
+# Used by: python scripts/train.py --config configs/phase4_delayed.yaml
+
+# ── Environment ────────────────────────────────────────────────────────────────
+env:
+  task_name: "hard_asymptomatic_high_density"
+  seed: 42
+  max_nodes: 20
+
+# ── PPO Hyperparameters ────────────────────────────────────────────────────────
+ppo:
+  total_timesteps: 200000
+  n_envs: 1
+  n_steps: 64
+  batch_size: 256
+  n_epochs: 4
+  lr: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+
+# ── Network Architecture ───────────────────────────────────────────────────────
+model:
+  policy_type: "hybrid"
+  hidden_dims: [128, 128]
+
+# ── Phase 4: Delayed Observation / Belief State ───────────────────────────────
+lag:
+  steps: 2             # reporting lag in env steps (0 = no lag)
+  history_len: 4       # number of past observations in belief state
+  mode: "concat"       # "concat" | "mean"
+  pad_with_zeros: true # fill missing history with zeros
+
+# ── Phase 2: Hybrid Action ────────────────────────────────────────────────────
+hybrid:
+  enabled: true
+  num_discrete_actions: 4
+  vaccine_budget_handling: "renorm"
+  min_vaccine_amount: 0.0001
+  entropy_coef_discrete: 0.01
+  entropy_coef_continuous: 0.001
+  masking_enabled: true
+
+# ── Logging & Checkpointing ────────────────────────────────────────────────────
+logging:
+  log_interval: 10
+  checkpoint_dir: "checkpoints/phase4"
+  checkpoint_interval: 50
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  n_episodes: 10
+  deterministic: true
+  checkpoint_path: null
+  tasks: ["easy_localized_outbreak", "hard_asymptomatic_high_density"]
+  seeds: [42, 43, 44]

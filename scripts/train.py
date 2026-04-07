@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
-"""Training entry-point for the PPO baseline.
+"""Training entry-point for all PPO variants (baseline, hybrid, ST-GNN, MoRL).
 
 Usage
 -----
+    # Phase 1 baseline
     python scripts/train.py --config configs/baseline.yaml
+
+    # Phase 2 hybrid actions
+    python scripts/train.py --config configs/phase2_hybrid.yaml
+
+    # Phase 3 ST-GNN encoder
+    python scripts/train.py --config configs/phase3_stgnn.yaml
+
+    # Phase 6 multi-objective RL
+    python scripts/train.py --config configs/phase6_morl.yaml
+
+    # Full pipeline (Phases 3-6 combined)
+    python scripts/train.py --config configs/full_pipeline.yaml
+
+    # Common overrides
     python scripts/train.py --config configs/baseline.yaml --seed 1
     python scripts/train.py --config configs/baseline.yaml --task medium_multi_center_spread
     python scripts/train.py --config configs/baseline.yaml --smoke-test
 
-The ``--smoke-test`` flag limits training to 10 steps so the script can be
-validated in CI without a full training run.
+The ``--smoke-test`` flag limits training to 10 steps for quick CI validation.
+
+Trainer selection
+-----------------
+The trainer is chosen based on config keys:
+  - ``morl`` key present → ``PPOMorl`` (Phase 6)
+  - ``model.policy_type == "st"`` → ``PPOBaseline`` with ``STActorCritic``
+  - otherwise → ``PPOBaseline`` (Phase 1/2)
 """
 
 from __future__ import annotations
@@ -129,11 +150,16 @@ def main() -> None:
     _set_seeds(seed)
     logger.info("Seed set to %d", seed)
 
-    from src.train.ppo_baseline import PPOBaseline
+    # Select trainer based on config
+    if "morl" in cfg:
+        logger.info("MoRL config detected — using PPOMorl trainer (Phase 6)")
+        from src.train.ppo_morl import PPOMorl
+        trainer: Any = PPOMorl(config=cfg)
+    else:
+        from src.train.ppo_baseline import PPOBaseline
+        trainer = PPOBaseline(config=cfg)
 
-    trainer = PPOBaseline(config=cfg)
     trainer.train()
-
     logger.info("Training finished.")
 
 
