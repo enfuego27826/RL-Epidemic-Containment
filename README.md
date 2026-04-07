@@ -310,48 +310,112 @@ These scores are deterministic for the current task definitions and are intended
 ## RL Baseline Scaffold
 
 An initial PPO baseline scaffold is included for training RL agents against this environment.
-See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full phased roadmap and
-[`docs/PHASE_1_BASELINE_PLAN.md`](docs/PHASE_1_BASELINE_PLAN.md) for Phase 1 milestones.
+See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the full phased roadmap,
+[`docs/PHASE_1_BASELINE_PLAN.md`](docs/PHASE_1_BASELINE_PLAN.md) for Phase 1 milestones, and
+[`docs/PHASE_2_HYBRID_ACTION_PLAN.md`](docs/PHASE_2_HYBRID_ACTION_PLAN.md) for Phase 2 design.
 
 ### Project Structure
 
 ```
 src/
-  env/            # Environment adapter (OpenEnvAdapter)
-  models/         # Actor-critic network architectures
-  train/          # PPO training loop and rollout buffer
-  eval/           # Evaluation utilities
+  env/
+    openenv_adapter.py   # Environment adapter (supports Phase 1 discrete + Phase 2 hybrid)
+    action_masking.py    # Phase 2: mask builders, budget projection, action validation
+  models/
+    actor_critic.py      # ActorCritic (Phase 1) + HybridActorCritic (Phase 2)
+    hybrid_action.py     # Phase 2: HybridActionDist (discrete + continuous heads)
+  train/
+    ppo_baseline.py      # PPO training loop (Phase 1 & 2 compatible)
+  tests/
+    smoke_phase2.py      # Phase 2 lightweight smoke checks
+  eval/                  # Evaluation utilities
 configs/
-  baseline.yaml   # PPO hyperparameters
+  baseline.yaml          # Phase 1 PPO hyperparameters
+  phase2_hybrid.yaml     # Phase 2 hybrid action hyperparameters
 scripts/
-  train.py        # Training entry-point
-  eval.py         # Evaluation entry-point
+  train.py               # Training entry-point
+  eval.py                # Evaluation entry-point
+docs/
+  PHASE_1_BASELINE_PLAN.md
+  PHASE_2_HYBRID_ACTION_PLAN.md
+```
+
+### Phase 1 — Discrete-Only Baseline
+
+The Phase 1 scaffold uses a per-node categorical action space
+`{0: no-op, 1: quarantine, 2: lift_quarantine, 3: vaccinate}` with a fixed
+vaccine dose per step.
+
+### Phase 2 — Hybrid Action Space (PAMDP)
+
+Phase 2 replaces the coarse discrete approximation with a true hybrid action space:
+
+- **Discrete head** — per-node `{no-op, quarantine, lift, vaccinate-candidate}` with
+  invalid-action masking (e.g., prevents lifting non-quarantined nodes).
+- **Continuous head** — per-node vaccine allocation vector, non-negative and projected
+  to sum ≤ vaccine budget via L1 renormalisation.
+- **HybridActionDist** — samples both heads, computes combined log-probability for PPO.
+- **Separate entropy coefficients** — `entropy_coef_discrete` and `entropy_coef_continuous`
+  control exploration independently.
+
+#### Phase 2 Action Schema
+
+```python
+# Policy output (Phase 2)
+hybrid_action = {
+    "discrete":   [0, 1, 0, 3, ...],   # list[int], per-node
+    "continuous": [0.0, 0.0, 5.2, ...], # list[float], vaccine allocation, sum <= budget
+}
+```
+
+#### Enabling Phase 2
+
+Set `hybrid.enabled: true` in the config (already set in `configs/phase2_hybrid.yaml`):
+
+```yaml
+hybrid:
+  enabled: true
+  entropy_coef_discrete: 0.01
+  entropy_coef_continuous: 0.001
+  masking_enabled: true
 ```
 
 ### Running the Baseline Scaffold
 
-Train with default config:
+Train with Phase 1 discrete-only config:
 
 ```bash
 python scripts/train.py --config configs/baseline.yaml
 ```
 
-Smoke-test (10 steps, no output files):
+Train with Phase 2 hybrid action config:
 
 ```bash
-python scripts/train.py --config configs/baseline.yaml --smoke-test
+python scripts/train.py --config configs/phase2_hybrid.yaml
+```
+
+Smoke-test Phase 2 (10 steps, no output files):
+
+```bash
+python scripts/train.py --config configs/phase2_hybrid.yaml --smoke-test
+```
+
+Run Phase 2 unit smoke checks:
+
+```bash
+python src/tests/smoke_phase2.py
 ```
 
 Evaluate (uses randomly initialised weights until a trained checkpoint is available):
 
 ```bash
-python scripts/eval.py --config configs/baseline.yaml --n-episodes 5
+python scripts/eval.py --config configs/phase2_hybrid.yaml --n-episodes 5
 ```
 
 Override task or seed at the CLI:
 
 ```bash
-python scripts/train.py --config configs/baseline.yaml --task medium_multi_center_spread --seed 1
+python scripts/train.py --config configs/phase2_hybrid.yaml --task medium_multi_center_spread --seed 1
 ```
 
 ---

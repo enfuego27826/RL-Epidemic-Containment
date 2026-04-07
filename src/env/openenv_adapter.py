@@ -32,9 +32,18 @@ each element encodes the intervention for node i:
   2 → lift_quarantine
   3 → vaccinate (fixed amount = VACCINATE_AMOUNT_FRACTION * vaccine_budget)
 
-TODO (Phase 2): replace with hybrid action space:
-  - discrete head:  per-node {no-op, quarantine, lift, vaccinate-candidate}
-  - continuous head: vaccine allocation vector (nonneg, budget-projected)
+Action encoding (v1 — Phase 2 hybrid)
+--------------------------------------
+A dict with two keys is accepted:
+
+  {
+    "discrete":   list[int]   # per-node {0,1,2,3}
+    "continuous": list[float] # per-node vaccine allocation, sum <= budget
+  }
+
+When the ``"discrete"`` key for node i is ACTION_VACCINATE (3), the
+corresponding ``continuous[i]`` amount is injected as the vaccinate amount.
+Nodes with discrete != 3 do not consume vaccine budget.
 
 TODO (Phase 3): add graph adjacency tensor output for ST-GNN encoder.
 TODO (Phase 4): expose observation history buffer for belief-state module.
@@ -63,7 +72,7 @@ from models import EpidemicAction  # noqa: E402
 NODE_FEATURE_DIM: int = 4
 GLOBAL_FEATURE_DIM: int = 4
 
-# Fraction of current vaccine_budget used for a single vaccinate action.
+# Fraction of current vaccine_budget used for a single vaccinate action (v0 baseline).
 VACCINATE_AMOUNT_FRACTION: float = 0.25
 
 # Discrete action codes
@@ -72,6 +81,9 @@ ACTION_QUARANTINE: int = 1
 ACTION_LIFT: int = 2
 ACTION_VACCINATE: int = 3
 NUM_DISCRETE_ACTIONS: int = 4
+
+# Minimum amount treated as a meaningful vaccine dose (continuous head)
+_MIN_VACCINE_AMOUNT: float = 1e-4
 
 
 class OpenEnvAdapter:
@@ -111,6 +123,10 @@ class OpenEnvAdapter:
         # obs_dim is fixed after the first reset()
         self.obs_dim: int = max_nodes * NODE_FEATURE_DIM + GLOBAL_FEATURE_DIM
 
+        # Phase 2: invalid-action diagnostics accumulated per episode
+        self._invalid_action_count: int = 0
+        self._total_steps: int = 0
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -140,6 +156,10 @@ class OpenEnvAdapter:
             self._env.engine.initial_vaccine_budget or 1.0
         )
 
+        # Reset per-episode diagnostics
+        self._invalid_action_count = 0
+        self._total_steps = 0
+
         obs_tensor = self._obs_to_tensor(obs_model)
         info: dict[str, Any] = {
             "node_ids": self._node_ids,
@@ -150,17 +170,23 @@ class OpenEnvAdapter:
 
     def step(
         self,
-        action: list[int],
+        action: list[int] | dict[str, Any],
     ) -> tuple[list[float], float, bool, dict[str, Any]]:
         """Apply an action and return the next transition.
 
         Parameters
         ----------
         action:
-            Integer list of length ``max_nodes``.  Entries beyond
-            ``num_nodes`` are ignored.  Each integer is one of
-            ``ACTION_NOOP``, ``ACTION_QUARANTINE``, ``ACTION_LIFT``,
-            ``ACTION_VACCINATE``.
+            Either:
+
+            * **Phase 1 (discrete-only)**: integer list of length ``max_nodes``.
+              Each element is one of ``ACTION_NOOP``, ``ACTION_QUARANTINE``,
+              ``ACTION_LIFT``, ``ACTION_VACCINATE``.
+
+            * **Phase 2 (hybrid)**: dict with keys:
+              - ``"discrete"``:   list[int] of length ``max_nodes``
+              - ``"continuous"``: list[float] of length ``max_nodes``,
+                non-negative vaccine allocations.
 
         Returns
         -------
@@ -171,18 +197,30 @@ class OpenEnvAdapter:
         done:
             Episode termination flag.
         info:
-            Dict forwarded from the underlying env plus ``"node_ids"``.
+            Dict forwarded from the underlying env plus ``"node_ids"`` and
+            Phase 2 diagnostics (``"invalid_action_count"``, ``"invalid_action_rate"``).
         """
         epidemic_action = self._action_to_epidemic(action)
         obs_model, reward, done, info = self._env.step(epidemic_action)
         obs_tensor = self._obs_to_tensor(obs_model)
+        self._total_steps += 1
         info["node_ids"] = self._node_ids
+        info["invalid_action_count"] = self._invalid_action_count
+        info["invalid_action_rate"] = (
+            self._invalid_action_count / self._total_steps
+            if self._total_steps > 0 else 0.0
+        )
         return obs_tensor, float(reward), bool(done), info
 
     @property
     def num_nodes(self) -> int:
         """Number of active nodes in the current episode."""
         return len(self._node_ids)
+
+    @property
+    def vaccine_budget(self) -> float:
+        """Current remaining vaccine budget from the underlying environment."""
+        return float(self._env.engine.vaccine_budget)
 
     # ------------------------------------------------------------------
     # Observation normalisation
@@ -236,36 +274,82 @@ class OpenEnvAdapter:
     # Action mapping
     # ------------------------------------------------------------------
 
-    def _action_to_epidemic(self, action: list[int]) -> EpidemicAction:
-        """Convert a discrete per-node action array to ``EpidemicAction``.
+    def _action_to_epidemic(self, action: list[int] | dict[str, Any]) -> EpidemicAction:
+        """Convert a discrete or hybrid action to ``EpidemicAction``.
 
-        Parameters
-        ----------
-        action:
-            Integer list of length ``max_nodes``.
+        Supports two calling conventions:
+
+        Phase 1 (discrete-only):
+            ``action`` is a list[int] of length ``max_nodes``.
+
+        Phase 2 (hybrid):
+            ``action`` is a dict with:
+              - ``"discrete"``:   list[int] per-node action codes
+              - ``"continuous"``: list[float] per-node vaccine allocations
+
+        Invalid discrete choices (e.g., lifting a non-quarantined node) are
+        detected here and counted in ``self._invalid_action_count`` as a
+        defensive measure; the masking layer should prevent them before
+        reaching this point.
 
         Returns
         -------
         EpidemicAction with a (possibly empty) interventions list.
-
-        TODO (Phase 2): extend to handle hybrid (discrete + continuous) by
-        accepting a dict with ``"discrete"`` and ``"continuous"`` keys.
-        TODO (Phase 2): generate action masks for invalid action pruning.
         """
         interventions: list[dict[str, Any]] = []
         vax_budget = float(self._env.engine.vaccine_budget)
-        vax_amount = VACCINATE_AMOUNT_FRACTION * vax_budget
 
-        for i, act in enumerate(action[: self.num_nodes]):
+        # --- Unpack action -----------------------------------------------
+        if isinstance(action, dict):
+            discrete_acts: list[int] = list(action["discrete"])
+            continuous_alloc: list[float] = list(action.get("continuous", []))
+            # Pad/clip continuous to num_nodes length
+            while len(continuous_alloc) < self.num_nodes:
+                continuous_alloc.append(0.0)
+        else:
+            # Phase 1 fallback: list of ints
+            discrete_acts = list(action)
+            continuous_alloc = [VACCINATE_AMOUNT_FRACTION * vax_budget] * self.num_nodes
+
+        # --- Build quarantine state for validation -----------------------
+        # Read from the current observation (lazy rebuild from env state)
+        quarantined: set[str] = set()
+        try:
+            state = self._env.state()
+            for node_state in state.nodes:
+                if getattr(node_state, "is_quarantined", False):
+                    quarantined.add(node_state.node_id)
+        except Exception:
+            pass  # best-effort; don't crash on state access
+
+        # --- Map actions -------------------------------------------------
+        for i, act in enumerate(discrete_acts[: self.num_nodes]):
             node_id = self._node_ids[i]
+            is_q = node_id in quarantined
+
             if act == ACTION_QUARANTINE:
+                if is_q:
+                    # Already quarantined — invalid; count and skip
+                    self._invalid_action_count += 1
+                    continue
                 interventions.append({"kind": "quarantine", "node_id": node_id})
+
             elif act == ACTION_LIFT:
+                if not is_q:
+                    # Not quarantined — invalid; count and skip
+                    self._invalid_action_count += 1
+                    continue
                 interventions.append({"kind": "lift_quarantine", "node_id": node_id})
-            elif act == ACTION_VACCINATE and vax_amount > 0:
-                interventions.append(
-                    {"kind": "vaccinate", "node_id": node_id, "amount": vax_amount}
-                )
+
+            elif act == ACTION_VACCINATE:
+                amount = float(continuous_alloc[i]) if i < len(continuous_alloc) else 0.0
+                amount = max(amount, 0.0)  # clamp negative
+                if amount > _MIN_VACCINE_AMOUNT and vax_budget > 0:
+                    # Cap amount to remaining budget
+                    amount = min(amount, vax_budget)
+                    interventions.append(
+                        {"kind": "vaccinate", "node_id": node_id, "amount": amount}
+                    )
             # ACTION_NOOP → no entry
 
         # EpidemicAction enforces a hard cap of 3 interventions per step.
