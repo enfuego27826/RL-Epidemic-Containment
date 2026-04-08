@@ -205,6 +205,9 @@ def check_gates_from_episode_results(results: list[Any]) -> dict[str, Any]:
         mean_peak = sum(r.peak_infection for r in task_results) / n
         mean_econ = sum(r.mean_economy for r in task_results) / n
         mean_inv_pct = sum(
+            # Defensive clamp to [0,1] before converting to percentage.
+            # The scenario_runner already applies this clamp, but we guard
+            # here too in case episode results are constructed directly.
             min(r.invalid_action_rate, 1.0) * 100.0 for r in task_results
         ) / n
         results_by_task[task_name] = {

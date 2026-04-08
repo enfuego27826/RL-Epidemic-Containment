@@ -149,18 +149,14 @@ class OpenEnvAdapter:
 
         Raises
         ------
-        AssertionError
-            If the underlying environment is not an OpenEnv-compatible
-            ``EpidemicContainmentStrategyEnv`` instance.
         ImportError
             If the ``env`` module (providing ``EpidemicContainmentStrategyEnv``)
-            cannot be imported.
+            cannot be imported, indicating openenv-core is not installed or
+            the env adapter is missing.
+        AssertionError
+            If the ``EpidemicContainmentStrategyEnv`` class is not exported
+            from the env module (unexpected but defensive check).
         """
-        from env import EpidemicContainmentStrategyEnv as _Env  # noqa: F401
-        assert _Env is not None, (
-            "OpenEnv conformance check failed: EpidemicContainmentStrategyEnv is None."
-        )
-        # Verify the openenv.core interface is present via the env module
         import env as _env_module
         assert hasattr(_env_module, "EpidemicContainmentStrategyEnv"), (
             "OpenEnv conformance check failed: EpidemicContainmentStrategyEnv not "

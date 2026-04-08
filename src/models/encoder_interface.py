@@ -116,7 +116,14 @@ class MLPEncoder(EncoderBase):
     All weights are stored as plain Python lists so this class is importable
     without PyTorch.  For actual training, the actor-critic models use
     PyTorch-native layers (see :class:`src.models.actor_critic.ActorCritic`).
-    This encoder is primarily used as the conceptual/config-level reference.
+    This encoder is primarily used as the conceptual/config-level reference and
+    for unit-testing the encoder interface.
+
+    .. warning::
+        The pure-Python matrix multiply in :meth:`encode` is O(n²) per layer
+        and is **not intended for use in hot training paths**.  For training,
+        the actor-critic uses PyTorch-native layers directly; this class serves
+        as a stdlib-only reference implementation and configuration anchor.
     """
 
     def __init__(

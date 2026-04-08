@@ -209,7 +209,8 @@ def check_openenv_adapter() -> None:
 
     # Try a lift on a non-quarantined node → should increment lift invalid count
     adapter.reset()
-    lift_action = [2] * 20  # lift_quarantine on all nodes (none quarantined)
+    from src.env.openenv_adapter import ACTION_LIFT
+    lift_action = [ACTION_LIFT] * 20  # lift_quarantine on all nodes (none quarantined)
     obs3, _, _, info3 = adapter.step(lift_action)
     _check("lift on non-quarantined increments lift invalid count",
            adapter._invalid_by_type["lift"] > 0)

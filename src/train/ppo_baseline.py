@@ -388,26 +388,6 @@ class PPOBaseline:
     # Advantage computation (GAE)
     # ------------------------------------------------------------------
 
-    def compute_advantages(self, next_obs: list[float] | None = None) -> None:
-        """Compute GAE-lambda advantages and discounted returns.
-
-        Stores results in ``self._buffer.advantages`` and
-        ``self._buffer.returns``.
-
-        Parameters
-        ----------
-        next_obs:
-            Observation *after* the last rollout step used for value
-            bootstrapping.  If ``None``, bootstraps with 0 (treats last
-            step as terminal).
-
-        TODO: pass ``next_obs`` from ``_collect_rollout`` for proper
-        bootstrapping when episodes don't end at rollout boundaries.
-        """
-        T = len(self._buffer)
-        advantages = [0.0] * T
-        returns = [0.0] * T
-
     def compute_advantages(self, next_obs: list[float] | None = None) -> dict[str, float]:
         """Compute GAE-lambda advantages and discounted returns.
 
