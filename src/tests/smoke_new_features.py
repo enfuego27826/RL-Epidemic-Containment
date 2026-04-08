@@ -172,6 +172,30 @@ def check_ppo_lr_schedule() -> None:
     _check("buffer advantages normalised (mean≈0)",
            abs(sum(buf.advantages) / max(len(buf.advantages), 1)) < 0.1)
 
+    # Test next_obs bootstrapping path (when last transition is non-terminal)
+    import torch
+    for i in range(T):
+        buf.rewards[i] = 0.0
+        buf.values[i] = 0.0
+        buf.dones[i] = False
+
+    original_forward = trainer._policy.forward
+
+    def _mock_forward(_obs_t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = torch.zeros((trainer.max_nodes, trainer._policy.action_dim), dtype=torch.float32)
+        value = torch.tensor([1.0], dtype=torch.float32)
+        return logits, value
+
+    trainer._policy.forward = _mock_forward  # type: ignore[method-assign]
+    trainer.compute_advantages(next_obs=[0.1] * trainer._adapter.obs_dim)
+    trainer._policy.forward = original_forward
+
+    _check(
+        "next_obs bootstrap contributes positive return on final non-terminal step",
+        len(buf.returns) > 0 and buf.returns[-1] > 0.5,
+        f"got final return={buf.returns[-1] if buf.returns else 'empty'}",
+    )
+
 
 # ===========================================================================
 # OpenEnvAdapter per-type invalid tracking + conformance

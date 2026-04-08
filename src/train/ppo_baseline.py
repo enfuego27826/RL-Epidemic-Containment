@@ -218,7 +218,7 @@ class PPOBaseline:
             obs = self._collect_rollout(obs)
 
             # ── Compute advantages ───────────────────────────────────────
-            adv_stats = self.compute_advantages()
+            adv_stats = self.compute_advantages(next_obs=obs)
 
             # ── Optimise ────────────────────────────────────────────────
             metrics = self.update_policy()
@@ -408,14 +408,29 @@ class PPOBaseline:
             ``explained_variance`` of the **raw** (pre-normalisation)
             advantages.  Used for TensorBoard diagnostics.
 
-        TODO: pass ``next_obs`` from ``_collect_rollout`` for proper
-        bootstrapping when episodes don't end at rollout boundaries.
         """
         T = len(self._buffer)
         advantages = [0.0] * T
         returns = [0.0] * T
 
-        next_value = 0.0  # bootstrap: 0 if terminal or not provided
+        # Bootstrap from V(next_obs) only when a continuation state is provided
+        # and the rollout did not terminate on its final transition.
+        next_value = 0.0
+        if T > 0 and next_obs is not None and not self._buffer.dones[-1]:
+            try:
+                next_obs_t = torch.tensor(next_obs, dtype=torch.float32)
+                with torch.no_grad():
+                    if self.hybrid_mode:
+                        _, _, next_value_t = self._policy._forward_tensor(next_obs_t)
+                    else:
+                        _, next_value_t = self._policy.forward(next_obs_t)
+                next_value = float(next_value_t.squeeze().item())
+            except Exception as exc:
+                logger.warning(
+                    "Failed to bootstrap next_value from next_obs (%s); "
+                    "falling back to 0.0",
+                    exc,
+                )
         next_advantage = 0.0
 
         for t in reversed(range(T)):
