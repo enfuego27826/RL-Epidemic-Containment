@@ -82,12 +82,7 @@ class EpidemicContainmentStrategyEnv:
         reward_components = self._compute_reward_components(
             previous_metrics, engine_result, len(errors)
         )
-        reward = round((
-            reward_components["reward_health"]
-            + reward_components["reward_economy"]
-            + reward_components["reward_control"]
-            + reward_components["reward_penalty"]
-        ), 6)
+        reward = round(sum(reward_components.values()), 6)
         self._done = bool(engine_result["done"])
 
         history_entry = StepHistoryEntry(
