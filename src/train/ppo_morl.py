@@ -560,7 +560,7 @@ class PPOMorl:
             )
 
     def _save_checkpoint(self, filename: str) -> None:
-        """Save a text checkpoint with training metrics."""
+        """Save a text checkpoint with training metrics and a .pt weights file."""
         path = os.path.join(self.checkpoint_dir, filename)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         mean_return = (
@@ -574,7 +574,23 @@ class PPOMorl:
             f.write(f"task={self.task_name}\n")
             f.write(f"seed={self.seed}\n")
             f.write(f"morl_weights={self.weights}\n")
-        logger.info("Checkpoint saved: %s", path)
+
+        # Also persist PyTorch weights so the eval harness can load them.
+        weights_path = path.replace(".txt", ".pt")
+        try:
+            import torch
+            torch.save(
+                {
+                    "global_step": self._global_step,
+                    "n_updates": self._update_count,
+                    "policy_state_dict": self._policy.state_dict(),
+                },
+                weights_path,
+            )
+            logger.info("Checkpoint saved: %s  (weights: %s)", path, weights_path)
+        except Exception as exc:
+            logger.warning("Could not save .pt weights (%s). Metadata saved: %s", exc, path)
+            logger.info("Checkpoint saved: %s", path)
 
     def _log_final_summary(self) -> None:
         """Log a final summary of training metrics."""

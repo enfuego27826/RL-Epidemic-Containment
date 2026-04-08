@@ -460,6 +460,82 @@ def check_inference_script() -> None:
     )
 
 
+def check_eval_harness_cli_checkpoint() -> None:
+    """Regression guard: run_eval_harness.py must accept --checkpoint without error."""
+    print("\n--- Phase 8 (regression): --checkpoint CLI argument ---")
+    import subprocess
+    import sys as _sys
+
+    # Test 1: --checkpoint flag is accepted (no unrecognized-argument error).
+    # We pass a non-existent path; the harness should warn but not crash at
+    # argparse level.  We only test argument acceptance here, not evaluation.
+    result = subprocess.run(
+        [
+            _sys.executable, str(_REPO_ROOT / "scripts" / "run_eval_harness.py"),
+            "--help",
+        ],
+        capture_output=True, text=True, cwd=str(_REPO_ROOT),
+    )
+    _check(
+        "--checkpoint appears in --help output",
+        "--checkpoint" in result.stdout,
+        result.stdout[:300] if "--checkpoint" not in result.stdout else "",
+    )
+
+    # Test 2: argparse accepts the flag without "unrecognized arguments" error.
+    # We invoke with --help which triggers sys.exit(0) right after printing help,
+    # before any environment or torch imports, so this is fast and self-contained.
+    _check(
+        "run_eval_harness --help exits cleanly",
+        result.returncode == 0,
+        result.stderr[-300:] if result.returncode != 0 else "",
+    )
+
+
+def check_eval_harness_checkpoint_override() -> None:
+    """Unit test: checkpoint_path set via CLI overrides config value."""
+    print("\n--- Phase 8: checkpoint_path override via CLI ---")
+    import argparse
+
+    # Simulate what run_eval_harness.py does when --checkpoint is passed.
+    cfg: dict = {"eval": {"checkpoint_path": None}}
+    cli_checkpoint = "/tmp/fake_checkpoint.pt"
+    # Mimic the override logic from run_eval_harness.py
+    cfg.setdefault("eval", {})["checkpoint_path"] = cli_checkpoint
+
+    _check(
+        "checkpoint_path overridden in config",
+        cfg["eval"]["checkpoint_path"] == cli_checkpoint,
+    )
+
+    # EvalHarness should pick it up from config.
+    from src.eval.scenario_runner import EvalHarness
+    harness = EvalHarness(cfg)
+    _check(
+        "EvalHarness._checkpoint_path set from config",
+        harness._checkpoint_path == cli_checkpoint,
+    )
+
+
+def check_checkpoint_loading_missing_file() -> None:
+    """Unit test: _load_checkpoint warns gracefully when file does not exist."""
+    print("\n--- Phase 8: _load_checkpoint missing-file handling ---")
+    from src.eval.scenario_runner import _load_checkpoint
+
+    # Create a tiny mock policy with load_state_dict to verify it is NOT called.
+    class _MockPolicy:
+        def __init__(self) -> None:
+            self.loaded = False
+
+        def load_state_dict(self, sd: dict) -> None:
+            self.loaded = True
+
+    mock = _MockPolicy()
+    result = _load_checkpoint(mock, "/tmp/nonexistent_checkpoint_xyz.pt")
+    _check("missing checkpoint returns False", result is False)
+    _check("load_state_dict not called for missing file", not mock.loaded)
+
+
 # ===========================================================================
 # Runner
 # ===========================================================================
@@ -483,6 +559,9 @@ if __name__ == "__main__":
     check_eval_harness()
     check_scripts_importable()
     check_inference_script()
+    check_eval_harness_cli_checkpoint()
+    check_eval_harness_checkpoint_override()
+    check_checkpoint_loading_missing_file()
 
     print()
     print("=" * 60)

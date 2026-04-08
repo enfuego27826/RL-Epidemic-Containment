@@ -313,10 +313,45 @@ python scripts/eval.py --config configs/baseline.yaml --task hard --n-episodes 5
 
 ### Robustness / generalization harness (Phase 7)
 ```bash
-# All three tasks × 3 seeds × 3 episodes
+# All three tasks × 3 seeds × 3 episodes (no checkpoint — random/initial policy)
 python scripts/run_eval_harness.py --config configs/full_pipeline.yaml
 
-# Specific tasks and seeds
+# Load a trained checkpoint — Phase 4 (delayed observations)
+python scripts/run_eval_harness.py \
+    --config configs/phase4_delayed.yaml \
+    --checkpoint checkpoints/phase4/checkpoint_final.pt \
+    --tasks easy medium hard \
+    --seeds 0 1 2 \
+    --n-episodes 5
+
+# Load a trained checkpoint — Phase 3 (ST-GNN encoder)
+python scripts/run_eval_harness.py \
+    --config configs/phase3_stgnn.yaml \
+    --checkpoint checkpoints/phase3/checkpoint_final.pt \
+    --tasks easy medium hard \
+    --seeds 0 1 2 \
+    --n-episodes 5
+
+# Load a trained checkpoint — Phase 6 (MoRL)
+python scripts/run_eval_harness.py \
+    --config configs/phase6_morl.yaml \
+    --checkpoint checkpoints/phase6/checkpoint_final.pt \
+    --tasks easy medium hard \
+    --seeds 0 1 2 \
+    --n-episodes 5
+
+# Baseline — load latest checkpoint
+python scripts/run_eval_harness.py \
+    --config configs/baseline.yaml \
+    --checkpoint checkpoints/baseline/checkpoint_final.pt \
+    --tasks easy medium hard \
+    --seeds 0 1 2 \
+    --n-episodes 5
+
+# The --checkpoint flag overrides eval.checkpoint_path in the config.
+# Omitting --checkpoint falls back to the config value (or no checkpoint if null).
+
+# Specific tasks and seeds (no checkpoint)
 python scripts/run_eval_harness.py --config configs/baseline.yaml \
     --tasks easy medium hard \
     --seeds 0 1 2 \
@@ -324,8 +359,10 @@ python scripts/run_eval_harness.py --config configs/baseline.yaml \
 
 # Save results to file
 python scripts/run_eval_harness.py --config configs/baseline.yaml \
+    --checkpoint checkpoints/phase4/checkpoint_final.pt \
     --output results/eval.json
 python scripts/run_eval_harness.py --config configs/baseline.yaml \
+    --checkpoint checkpoints/phase4/checkpoint_final.pt \
     --output results/eval.csv
 ```
 
@@ -411,6 +448,7 @@ eval:
   seeds: [42, 43, 44]
   n_episodes: 5
   deterministic: true
+  checkpoint_path: null  # set to a .pt path, or override at CLI with --checkpoint
 ```
 
 ### Config files
@@ -431,16 +469,31 @@ eval:
 
 ## Expected Outputs
 
-After training, checkpoints are saved to the directory specified in `logging.checkpoint_dir`:
+After training, checkpoints are saved to the directory specified in `logging.checkpoint_dir`.
+Each save produces a pair of files — a human-readable metadata file and a PyTorch weights file:
 
 ```
 checkpoints/
   baseline/
-    checkpoint_final.txt    # training summary
-  phase2/
+    checkpoint_final.txt    # training summary (step, returns, config)
+    checkpoint_final.pt     # PyTorch weights — load with --checkpoint
+    checkpoint_step_3200.txt
+    checkpoint_step_3200.pt
+  phase3/
     checkpoint_final.txt
+    checkpoint_final.pt
+  phase4/
+    checkpoint_final.txt
+    checkpoint_final.pt
+  phase6/
+    checkpoint_final.txt
+    checkpoint_final.pt
   ...
 ```
+
+> **Note:** `checkpoints/phase6/` (MoRL) previously only saved `.txt` metadata files.
+> After the `ppo_morl.py` fix in this version, `.pt` weights files are now saved alongside
+> the metadata on every checkpoint interval, enabling `--checkpoint` to work for MoRL evals.
 
 The eval harness outputs a summary table:
 
