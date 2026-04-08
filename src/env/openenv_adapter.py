@@ -84,7 +84,8 @@ NUM_DISCRETE_ACTIONS: int = 4
 
 # Minimum amount treated as a meaningful vaccine dose (continuous head)
 _MIN_VACCINE_AMOUNT: float = 1e-4
-# Mirror env.py reward decomposition coefficients:
+# Mirror reward coefficients currently defined in /home/runner/work/RL-Epidemic-Containment/RL-Epidemic-Containment/env.py
+# (_compute_reward). Keep these in sync with env.py if reward weights change.
 #   reward += 8.0 * infection_delta + 2.5 * economy_delta + ...
 # These are exposed here for per-step diagnostics / MORL decomposition logging.
 HEALTH_REWARD_COEFFICIENT: float = 8.0

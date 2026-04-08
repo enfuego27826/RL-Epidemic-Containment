@@ -68,6 +68,7 @@ ECONOMY_DELTA_SCALE = 2.5
 # Log decomposition key usage for the first few steps only, to keep logs concise
 # while still making key routing transparent at startup.
 DECOMPOSITION_DIAG_LOG_STEPS = 5
+LARGE_ECONOMY_COMPONENT_THRESHOLD = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +105,9 @@ class RewardDecomposer:
         }
         self._economy_delta_scale = float(economy_delta_scale)
         if self._economy_delta_scale <= 0.0:
-            raise ValueError("economy_delta_scale must be positive.")
+            raise ValueError(
+                f"economy_delta_scale must be positive, got: {self._economy_delta_scale}"
+            )
         # Episode-level accumulators
         self._ep_components: dict[str, list[float]] = {k: [] for k in self.weights}
         # Multi-episode log
@@ -181,12 +184,13 @@ class RewardDecomposer:
                 economy = self._economy_delta_scale * (economy_score - self._prev_economy_score)
                 economy_key = f"{economy_score_key}:delta"
                 derived_from_score = True
-                if abs(economy) > 5.0:
+                if abs(economy) > LARGE_ECONOMY_COMPONENT_THRESHOLD:
                     logger.warning(
-                        "Large derived economy component: %.4f (key=%s, scale=%.3f)",
+                        "Large derived economy component: %.4f (key=%s, scale=%.3f, threshold=%.3f)",
                         economy,
                         economy_score_key,
                         self._economy_delta_scale,
+                        LARGE_ECONOMY_COMPONENT_THRESHOLD,
                     )
         if economy_score_key is not None:
             self._prev_economy_score = economy_score
