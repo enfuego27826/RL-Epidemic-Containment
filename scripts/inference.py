@@ -77,7 +77,7 @@ def main() -> None:
     deterministic = bool(cfg.get("eval", {}).get("deterministic", True))
 
     from src.env.openenv_adapter import OpenEnvAdapter
-    from src.eval.scenario_runner import _build_policy, _policy_act
+    from src.eval.scenario_runner import _build_policy, _policy_act, _load_checkpoint
 
     env = OpenEnvAdapter(task_name=task_name, seed=seed, max_nodes=max_nodes)
     obs, info = env.reset(seed=seed)
@@ -87,7 +87,19 @@ def main() -> None:
 
     checkpoint = args.checkpoint or cfg.get("eval", {}).get("checkpoint_path")
     if checkpoint and os.path.isfile(checkpoint):
-        logger.info("Checkpoint found: %s (weight loading not yet implemented)", checkpoint)
+        weights_path = checkpoint
+        if checkpoint.endswith(".txt"):
+            candidate = checkpoint[:-4] + ".pt"
+            if os.path.isfile(candidate):
+                weights_path = candidate
+            else:
+                logger.warning(
+                    "Checkpoint metadata file found but no .pt weights file beside it: %s",
+                    checkpoint,
+                )
+        loaded = _load_checkpoint(policy, weights_path)
+        if not loaded:
+            logger.warning("Failed to load checkpoint weights from: %s", weights_path)
     elif checkpoint:
         logger.warning("Checkpoint not found: %s — using random weights.", checkpoint)
 
