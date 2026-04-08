@@ -97,7 +97,11 @@ def main() -> None:
                 str(base_path.with_suffix(".pt")),
                 str(base_path.with_suffix(".pth")),
             ]
-            resolved = next((c for c in candidates if os.path.isfile(c)), None)
+            resolved = None
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    resolved = candidate
+                    break
             if resolved is not None:
                 weights_path = resolved
             else:
