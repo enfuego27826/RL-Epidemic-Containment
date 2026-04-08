@@ -534,7 +534,7 @@ def check_checkpoint_loading_missing_file() -> None:
             def __init__(self) -> None:
                 self.loaded = False
 
-            def load_state_dict(self, sd: dict) -> None:
+            def load_state_dict(self, state_dict: dict) -> None:
                 self.loaded = True
 
         mock = _MockPolicy()

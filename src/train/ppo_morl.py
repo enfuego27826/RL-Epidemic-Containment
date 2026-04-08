@@ -576,7 +576,7 @@ class PPOMorl:
             f.write(f"morl_weights={self.weights}\n")
 
         # Also persist PyTorch weights so the eval harness can load them.
-        weights_path = str(Path(path).with_suffix(".pt"))
+        pt_checkpoint_path = str(Path(path).with_suffix(".pt"))
         try:
             import torch
             torch.save(
@@ -585,9 +585,9 @@ class PPOMorl:
                     "n_updates": self._update_count,
                     "policy_state_dict": self._policy.state_dict(),
                 },
-                weights_path,
+                pt_checkpoint_path,
             )
-            logger.info("Checkpoint saved: %s  (weights: %s)", path, weights_path)
+            logger.info("Checkpoint saved: %s  (weights: %s)", path, pt_checkpoint_path)
         except Exception as exc:
             logger.warning("Could not save .pt weights (%s). Metadata saved: %s", exc, path)
             logger.info("Checkpoint saved: %s", path)

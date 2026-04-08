@@ -197,14 +197,14 @@ def _load_checkpoint(policy: Any, checkpoint_path: str) -> bool:
     bool
         ``True`` on success, ``False`` if loading was skipped or failed.
     """
+    resolved = str(Path(checkpoint_path).resolve())
+
     if not Path(checkpoint_path).exists():
         logger.warning(
             "Checkpoint not found — skipping weight load. "
-            "Path: %s", checkpoint_path,
+            "Path: %s", resolved,
         )
         return False
-
-    resolved = str(Path(checkpoint_path).resolve())
 
     try:
         import torch  # local import: not every user has torch
