@@ -50,6 +50,14 @@ python scripts/inference.py --config configs/baseline.yaml --task easy
 python scripts/eval.py --config configs/baseline.yaml
 ```
 
+### Generate Visuals (charts + graph)
+```bash
+# Run eval and visualize results (with city-network graph)
+python scripts/run_eval_harness.py --config configs/baseline.yaml --output results/eval.json
+python scripts/visualize.py --input results/eval.json --graph
+# Open out/report/report.html in your browser
+```
+
 ---
 
 ## Training
@@ -283,6 +291,102 @@ hard_asymptomatic_high_density         3   -12.6±0.5   0.75±0.12   0.62±0.03 
 
 ---
 
+## Visualizer
+
+Generate presentation-quality visuals from evaluation results — summary
+charts, epidemic-graph city-network views, animated walkthroughs, and an
+HTML report.
+
+### Install extra dependencies
+
+```bash
+pip install matplotlib pillow pyyaml
+```
+
+(These are already in `requirements.txt`.)
+
+### Quick start
+
+**Step 1** — Run the evaluation harness to produce a results file:
+
+```bash
+python scripts/run_eval_harness.py \
+    --config configs/baseline.yaml \
+    --output results/eval.json
+```
+
+**Step 2** — Generate visuals from that file:
+
+```bash
+python scripts/visualize.py --input results/eval.json
+```
+
+This writes all artifacts to `out/report/` and prints a summary:
+
+```
+Visualization complete — artifacts written to: out/report/
+  summary_overview          out/report/summary_overview.png
+  return_distribution       out/report/return-distribution.png
+  peak_infection            out/report/peak-infection.png
+  economy                   out/report/mean-economy.png
+  invalid_actions           out/report/invalid-action.png
+  csv_summary               out/report/summary.csv
+  html_report               out/report/report.html
+```
+
+Open `out/report/report.html` in your browser for a single-page summary.
+
+### Epidemic graph visualization
+
+Pass `--graph` to also render the city-network graph for one episode.
+Each city is a node coloured by infection rate (green → yellow → red).
+A red square border marks quarantined cities; a ★ marks vaccinated cities.
+Edges represent travel routes and are tinted by local infection spread.
+
+```bash
+python scripts/visualize.py \
+    --input results/eval.json \
+    --graph \
+    --graph-task easy \
+    --graph-seed 42
+```
+
+Outputs `graph_snapshot.png` (final step) and `graph_peak_infection.png`
+(step with highest global infection).
+
+### Animated GIF
+
+Add `--animate` to generate a frame-by-frame GIF of the episode (requires
+Pillow, which is included in `requirements.txt`):
+
+```bash
+python scripts/visualize.py \
+    --input results/eval.json \
+    --graph --animate \
+    --output-dir out/animated
+```
+
+### Full CLI reference
+
+```
+python scripts/visualize.py [OPTIONS]
+
+  --input PATH          Existing eval JSON/CSV.  If omitted, runs fresh eval.
+  --config PATH         Config for fresh eval (default: configs/baseline.yaml).
+  --output-dir DIR      Output directory (default: out/report).
+  --title TEXT          Report title.
+  --graph               Render city-network graph for one episode.
+  --graph-task TASK     Task for graph episode (default: easy_localized_outbreak).
+  --graph-seed INT      Seed for graph episode (default: 42).
+  --animate             Save animated GIF (requires Pillow).
+  --gif-fps INT         Frames per second for animated GIF (default: 4).
+  --format {png,html,all}  Output format (default: all).
+  --n-episodes N        Episodes per task for fresh eval (default: 5).
+  --seeds S [S ...]     Seeds for fresh eval (default: 42 43 44).
+```
+
+---
+
 ## Running Tests
 
 ```bash
@@ -291,9 +395,12 @@ python src/tests/smoke_phase2.py
 
 # Phases 3–8 smoke tests
 python src/tests/smoke_phases3to8.py
+
+# Visualizer smoke tests
+python src/tests/smoke_visualizer.py
 ```
 
-Both scripts exit with code 0 on success and print `[PASS]` / `[FAIL]` per check.
+All scripts exit with code 0 on success and print `[PASS]` / `[FAIL]` per check.
 
 ---
 
