@@ -87,18 +87,21 @@ def main() -> None:
 
     checkpoint = args.checkpoint or cfg.get("eval", {}).get("checkpoint_path")
     if checkpoint and os.path.isfile(checkpoint):
+        # Supported input formats:
+        #   1) direct torch weights checkpoint (.pt/.pth/etc.)
+        #   2) legacy metadata text file (.txt) with adjacent same-name .pt
         weights_path = checkpoint
         if checkpoint.endswith(".txt"):
             candidate = str(Path(checkpoint).with_suffix(".pt"))
             if os.path.isfile(candidate):
                 weights_path = candidate
             else:
-                weights_path = None
+                weights_path = ""
                 logger.warning(
                     "Checkpoint metadata file found but no .pt weights file beside it: %s",
                     checkpoint,
                 )
-        if weights_path is None:
+        if not weights_path:
             logger.warning("Skipping checkpoint load and using random weights.")
         elif not _load_checkpoint(policy, weights_path):
             logger.warning(
