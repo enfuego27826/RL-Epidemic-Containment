@@ -233,6 +233,25 @@ def check_reward_decomposer() -> None:
     _check("ep_health_sum in stats", "ep_health_sum" in stats)
     _check("ep_economy_mean in stats", "ep_economy_mean" in stats)
 
+    # Key fallback aliases for economy reward
+    alias_comps = decomp.decompose(0.0, {"economy_reward": 0.25})
+    _check("economy alias economy_reward works", abs(alias_comps["economy"] - 0.25) < 1e-9)
+    alias_comps2 = decomp.decompose(0.0, {"economy": -0.4})
+    _check("economy alias economy works", abs(alias_comps2["economy"] + 0.4) < 1e-9)
+
+    # Economy derivation from score delta when explicit reward key is absent
+    decomp_score = RewardDecomposer(weights={"health": 0.5, "economy": 0.3, "control": 0.1, "penalty": 0.1})
+    d0 = decomp_score.decompose(0.0, {"global_economic_score": 0.70})
+    d1 = decomp_score.decompose(0.0, {"global_economic_score": 0.74})
+    _check("first economy score delta is zero", abs(d0["economy"]) < 1e-9)
+    _check("economy score delta becomes non-zero", abs(d1["economy"]) > 1e-9)
+
+    # No component keys at all -> full reward to health fallback
+    decomp_fallback = RewardDecomposer(weights={"health": 0.5, "economy": 0.3, "control": 0.1, "penalty": 0.1})
+    fallback = decomp_fallback.decompose(1.25, {"foo": "bar"})
+    _check("absent-key fallback health == reward", abs(fallback["health"] - 1.25) < 1e-9)
+    _check("absent-key fallback economy == 0", abs(fallback["economy"]) < 1e-9)
+
 
 def check_morl_buffer() -> None:
     print("\n--- Phase 6: MorlRolloutBuffer ---")
@@ -268,6 +287,31 @@ def check_morl_smoke_train() -> None:
         _check("PPOMorl.train() completed without error", True)
     except Exception as e:
         _check("PPOMorl.train() completed without error", False, str(e))
+
+
+def check_adapter_reward_components() -> None:
+    print("\n--- Phase 6: OpenEnvAdapter reward-component diagnostics ---")
+    from src.env.openenv_adapter import OpenEnvAdapter
+
+    adapter = OpenEnvAdapter(task_name="easy_localized_outbreak", seed=42, max_nodes=20)
+    _obs, _info = adapter.reset(seed=42)
+
+    seen_non_zero_economy = False
+    seen_non_zero_health = False
+    for _ in range(20):
+        _obs, _reward, done, step_info = adapter.step([0] * adapter.num_nodes)
+        _check("step_info has reward_health", "reward_health" in step_info)
+        _check("step_info has reward_economy", "reward_economy" in step_info)
+        _check("step_info has global_economic_score", "global_economic_score" in step_info)
+        if abs(float(step_info.get("reward_economy", 0.0))) > 1e-9:
+            seen_non_zero_economy = True
+        if abs(float(step_info.get("reward_health", 0.0))) > 1e-9:
+            seen_non_zero_health = True
+        if done:
+            break
+
+    _check("adapter emits non-zero economy component within rollout", seen_non_zero_economy)
+    _check("adapter emits non-zero health component within rollout", seen_non_zero_health)
 
 
 # ===========================================================================
@@ -434,6 +478,7 @@ if __name__ == "__main__":
     check_reward_decomposer()
     check_morl_buffer()
     check_morl_smoke_train()
+    check_adapter_reward_components()
     check_invalid_action_rate_bounds()
     check_eval_harness()
     check_scripts_importable()
