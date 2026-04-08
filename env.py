@@ -88,7 +88,6 @@ class EpidemicContainmentStrategyEnv:
             + reward_components["reward_control"]
             + reward_components["reward_penalty"]
         )
-        reward = round(reward, 6)
         self._done = bool(engine_result["done"])
 
         history_entry = StepHistoryEntry(
