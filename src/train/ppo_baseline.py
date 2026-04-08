@@ -428,7 +428,7 @@ class PPOBaseline:
                 next_value = float(next_value_t.squeeze().item())
             except Exception as exc:
                 logger.warning(
-                    "Failed to bootstrap next_value from next_obs (%s); "
+                    "Failed to bootstrap next_value from next_obs (%r); "
                     "falling back to 0.0",
                     exc,
                 )

@@ -186,8 +186,13 @@ def check_ppo_lr_schedule() -> None:
     original_forward = trainer._policy.forward
 
     def _mock_forward(_obs_t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = torch.zeros((trainer.max_nodes, trainer._policy.action_dim), dtype=torch.float32)
-        value = torch.tensor([1.0], dtype=torch.float32)
+        device = next(trainer._policy.parameters()).device
+        logits = torch.zeros(
+            (trainer.max_nodes, trainer._policy.action_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+        value = torch.tensor([1.0], dtype=torch.float32, device=device)
         return logits, value
 
     trainer._policy.forward = _mock_forward  # type: ignore[method-assign]
