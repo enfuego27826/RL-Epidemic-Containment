@@ -182,6 +182,69 @@ def _policy_act(policy: Any, obs: list[float], deterministic: bool, max_nodes: i
     return actions
 
 
+def _load_checkpoint(policy: Any, checkpoint_path: str) -> bool:
+    """Load weights from a .pt checkpoint into *policy* in-place.
+
+    Parameters
+    ----------
+    policy:
+        A ``torch.nn.Module`` policy object whose weights should be replaced.
+    checkpoint_path:
+        Path to the ``.pt`` file produced by the training loop.
+
+    Returns
+    -------
+    bool
+        ``True`` on success, ``False`` if loading was skipped or failed.
+    """
+    resolved = str(Path(checkpoint_path).resolve())
+
+    if not Path(checkpoint_path).exists():
+        logger.warning(
+            "Checkpoint not found — skipping weight load. "
+            "Path: %s", resolved,
+        )
+        return False
+
+    try:
+        import torch  # local import: not every user has torch
+    except ImportError:
+        logger.warning(
+            "torch is not installed; cannot load checkpoint weights. "
+            "Path: %s", resolved,
+        )
+        return False
+
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+    except Exception as exc:
+        logger.error(
+            "Failed to read checkpoint file (%s). "
+            "Path: %s", exc, resolved,
+        )
+        return False
+
+    state_dict = ckpt.get("policy_state_dict")
+    if state_dict is None:
+        logger.error(
+            "Checkpoint has no 'policy_state_dict' key — incompatible format. "
+            "Available keys: %s. Path: %s",
+            list(ckpt.keys()), resolved,
+        )
+        return False
+
+    try:
+        policy.load_state_dict(state_dict)
+        logger.info("Checkpoint loaded: %s", resolved)
+        return True
+    except Exception as exc:
+        logger.error(
+            "load_state_dict failed (%s) — checkpoint may be incompatible with "
+            "current policy architecture. Path: %s", exc, resolved,
+        )
+        return False
+
+
 # ---------------------------------------------------------------------------
 # EvalHarness
 # ---------------------------------------------------------------------------
@@ -241,6 +304,10 @@ class EvalHarness:
         env = OpenEnvAdapter(task_name=task_name, seed=seed, max_nodes=self.max_nodes)
         obs_dim = env.obs_dim
         policy = _build_policy({**self.config, "env": {**self.config.get("env", {}), "seed": seed, "task_name": task_name}}, obs_dim)
+
+        # Load checkpoint weights if a path was provided
+        if self._checkpoint_path:
+            _load_checkpoint(policy, self._checkpoint_path)
 
         # Reset episode state for ST models
         if hasattr(policy, "reset_episode"):

@@ -11,6 +11,9 @@ Usage
     python scripts/run_eval_harness.py --config configs/baseline.yaml --seeds 0 1 2 --n-episodes 5
     python scripts/run_eval_harness.py --config configs/baseline.yaml --output results/eval.json
     python scripts/run_eval_harness.py --config configs/baseline.yaml --output results/eval.csv
+    python scripts/run_eval_harness.py --config configs/phase4_delayed.yaml \
+        --checkpoint checkpoints/phase4/checkpoint_final.pt \
+        --tasks easy medium hard --seeds 0 1 2 --n-episodes 5
 
 Task shorthand mapping
 ----------------------
@@ -78,6 +81,10 @@ def main() -> None:
                         help="Path to save results (.json or .csv).")
     parser.add_argument("--policy-type", type=str, default=None,
                         help="Override policy type: baseline|hybrid|st.")
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Path to a .pt checkpoint file to load. Overrides eval.checkpoint_path in config.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -97,6 +104,8 @@ def main() -> None:
         cfg["eval"]["n_episodes"] = args.n_episodes
     if args.policy_type is not None:
         cfg.setdefault("model", {})["policy_type"] = args.policy_type
+    if args.checkpoint is not None:
+        cfg.setdefault("eval", {})["checkpoint_path"] = args.checkpoint
 
     from src.eval.scenario_runner import EvalHarness
 
