@@ -305,6 +305,8 @@ class MorlRolloutBuffer:
         self.rewards: list[float] = []
         self.values: list[float] = []
         self.log_probs: list[float] = []
+        self.log_probs_discrete: list[float] = []
+        self.log_probs_continuous: list[float] = []
         self.dones: list[bool] = []
         self.reward_components: list[dict[str, float]] = []
 
@@ -320,12 +322,20 @@ class MorlRolloutBuffer:
         log_prob: float,
         done: bool,
         components: dict[str, float] | None = None,
+        # Separate discrete/continuous log-probs for use in the PPO IS ratio.
+        # Default 0.0 is only used by legacy callers that do not pass them
+        # (e.g. tests that only verify buffer bookkeeping).  All training-loop
+        # callers must supply the real values.
+        log_prob_discrete: float = 0.0,
+        log_prob_continuous: float = 0.0,
     ) -> None:
         self.obs.append(list(obs))
         self.actions.append(action)
         self.rewards.append(float(reward))
         self.values.append(float(value))
         self.log_probs.append(float(log_prob))
+        self.log_probs_discrete.append(float(log_prob_discrete))
+        self.log_probs_continuous.append(float(log_prob_continuous))
         self.dones.append(bool(done))
         self.reward_components.append(components or {"health": reward})
 
@@ -397,6 +407,21 @@ class PPOMorl:
         self.checkpoint_dir = str(log_cfg.get("checkpoint_dir", "checkpoints/morl"))
         self.checkpoint_interval = int(log_cfg.get("checkpoint_interval", 50))
 
+        # Log effective hyperparameters so config changes are visible in logs
+        logger.info(
+            "Effective PPO hyperparameters: lr=%.2e total_timesteps=%d "
+            "n_steps=%d batch_size=%d n_epochs=%d clip_eps=%.3f "
+            "gamma=%.4f gae_lambda=%.4f max_grad_norm=%.2f",
+            self.lr, self.total_timesteps, self.n_steps, self.batch_size,
+            self.n_epochs, self.clip_eps, self.gamma, self.gae_lambda,
+            self.max_grad_norm,
+        )
+        logger.info("Effective MoRL weights: %s", self.weights)
+        logger.info(
+            "Effective entropy coefficients: discrete=%.4f continuous=%.4f",
+            self.entropy_coef_discrete, self.entropy_coef_continuous,
+        )
+
         # Setup environment
         from src.env.openenv_adapter import NUM_DISCRETE_ACTIONS, OpenEnvAdapter
         self._env = OpenEnvAdapter(
@@ -407,6 +432,7 @@ class PPOMorl:
         # Setup policy
         hidden_dims = list(self.config.get("model", {}).get("hidden_dims", [128, 128]))
         from src.models.actor_critic import HybridActorCritic
+        import torch
         self._policy = HybridActorCritic(
             obs_dim=self.obs_dim,
             action_dim=NUM_DISCRETE_ACTIONS,
@@ -414,6 +440,9 @@ class PPOMorl:
             hidden_dims=hidden_dims,
             seed=self.seed,
         )
+
+        # Adam optimizer for gradient-based policy updates
+        self._optimizer = torch.optim.Adam(self._policy.parameters(), lr=self.lr)
 
         # Reward decomposer
         self._decomposer = RewardDecomposer(
@@ -471,6 +500,8 @@ class PPOMorl:
                     log_prob=log_prob,
                     done=done,
                     components=components,
+                    log_prob_discrete=lp_disc,
+                    log_prob_continuous=lp_cont,
                 )
                 obs = next_obs
                 ep_return += reward
@@ -512,7 +543,15 @@ class PPOMorl:
         self._log_final_summary()
 
     def _ppo_update(self) -> None:
-        """Simplified PPO update — computes GAE advantages and clips ratios."""
+        """PPO gradient update using HybridActorCritic and Adam optimizer.
+
+        Uses the discrete log-probabilities for the importance-sampling ratio
+        (matching PPOBaseline hybrid mode).  The combined entropy coefficient
+        blends discrete and continuous terms.
+        """
+        import torch
+        import torch.nn as nn
+
         buf = self._buffer
         T = len(buf)
         if T == 0:
@@ -537,26 +576,81 @@ class PPOMorl:
         if adv_std > 1e-8:
             advantages = [(a - adv_mean) / adv_std for a in advantages]
 
-        # --- Policy gradient (simplified scalar update) ---
-        # Real implementation would update weights; here we log metrics.
-        # Compute importance ratios (clamped to 1 since we reuse same policy)
-        policy_loss = 0.0
-        value_loss = 0.0
-        for t in range(T):
-            # Ratio r_t = pi_new / pi_old ≈ 1 for on-policy
-            ratio = 1.0
-            surr1 = ratio * advantages[t]
-            surr2 = max(1.0 - self.clip_eps, min(1.0 + self.clip_eps, ratio)) * advantages[t]
-            policy_loss += -min(surr1, surr2)
-            value_loss += (buf.values[t] - returns[t]) ** 2
+        # --- Convert rollout to tensors ---
+        obs_t = torch.tensor(buf.obs, dtype=torch.float32)                    # (T, obs_dim)
+        adv_t = torch.tensor(advantages, dtype=torch.float32)                 # (T,)
+        ret_t = torch.tensor(returns, dtype=torch.float32)                    # (T,)
+        actions_t = torch.tensor(
+            [a["discrete"] for a in buf.actions], dtype=torch.long
+        )                                                                      # (T, max_nodes)
+        # Use discrete log-probs for the IS ratio (same as PPOBaseline hybrid)
+        old_lp_disc_t = torch.tensor(
+            buf.log_probs_discrete, dtype=torch.float32
+        )                                                                      # (T,)
 
-        policy_loss /= max(T, 1)
-        value_loss /= max(T, 1)
+        indices = list(range(T))
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        n_batches = 0
 
+        for _ in range(self.n_epochs):
+            random.shuffle(indices)
+            for start in range(0, T, self.batch_size):
+                b_idx = indices[start : start + self.batch_size]
+                if not b_idx:
+                    continue
+                b_idx_t = torch.tensor(b_idx, dtype=torch.long)
+
+                b_obs      = obs_t[b_idx_t]           # (B, obs_dim)
+                b_adv      = adv_t[b_idx_t]           # (B,)
+                b_ret      = ret_t[b_idx_t]           # (B,)
+                b_actions  = actions_t[b_idx_t]       # (B, max_nodes)
+                b_old_lp   = old_lp_disc_t[b_idx_t]  # (B,)
+
+                self._optimizer.zero_grad()
+
+                disc_logits_t, _cont_logits_t, values_t = self._policy._forward_tensor(b_obs)
+                # disc_logits_t: (B, max_nodes, action_dim)
+
+                log_probs_t = torch.log_softmax(disc_logits_t, dim=-1)
+                new_lp_node = log_probs_t.gather(
+                    -1, b_actions.unsqueeze(-1)
+                ).squeeze(-1)                         # (B, max_nodes)
+                new_lp = new_lp_node.sum(dim=-1)      # (B,) combined discrete log-prob
+
+                ratio = torch.exp(new_lp - b_old_lp)
+                surr1 = ratio * b_adv
+                surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * b_adv
+                policy_loss = -torch.min(surr1, surr2).mean()
+
+                probs_t = torch.softmax(disc_logits_t, dim=-1)
+                entropy = -(probs_t * log_probs_t).sum(dim=-1).mean()
+
+                value_loss = 0.5 * (values_t.squeeze(-1) - b_ret).pow(2).mean()
+
+                loss = (
+                    policy_loss
+                    + self.value_loss_coef * value_loss
+                    - self.entropy_coef_discrete * entropy
+                )
+                loss.backward()
+                nn.utils.clip_grad_norm_(self._policy.parameters(), self.max_grad_norm)
+                self._optimizer.step()
+
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                total_entropy += entropy.item()
+                n_batches += 1
+
+        n_batches = max(n_batches, 1)
         if self._update_count % self.log_interval == 0:
             logger.debug(
-                "update=%d policy_loss=%.4f value_loss=%.4f mean_adv=%.4f",
-                self._update_count, policy_loss, value_loss, adv_mean,
+                "update=%d policy_loss=%.4f value_loss=%.4f entropy=%.4f",
+                self._update_count,
+                total_policy_loss / n_batches,
+                total_value_loss / n_batches,
+                total_entropy / n_batches,
             )
 
     def _save_checkpoint(self, filename: str) -> None:
@@ -578,16 +672,23 @@ class PPOMorl:
         # Also persist PyTorch weights so the eval harness can load them.
         pt_checkpoint_path = str(Path(path).with_suffix(".pt"))
         try:
+            import hashlib
             import torch
             torch.save(
                 {
                     "global_step": self._global_step,
                     "n_updates": self._update_count,
                     "policy_state_dict": self._policy.state_dict(),
+                    "optimizer_state_dict": self._optimizer.state_dict(),
+                    "morl_weights": self.weights,
                 },
                 pt_checkpoint_path,
             )
-            logger.info("Checkpoint saved: %s  (weights: %s)", path, pt_checkpoint_path)
+            sha = hashlib.sha256(Path(pt_checkpoint_path).read_bytes()).hexdigest()[:16]
+            logger.info(
+                "Checkpoint saved: %s  (weights: %s)  sha256=%s  step=%d",
+                path, pt_checkpoint_path, sha, self._global_step,
+            )
         except Exception as exc:
             logger.warning("Could not save .pt weights (%s). Metadata saved: %s", exc, path)
             logger.info("Checkpoint saved: %s", path)

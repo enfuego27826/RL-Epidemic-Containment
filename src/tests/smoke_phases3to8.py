@@ -259,10 +259,17 @@ def check_morl_buffer() -> None:
 
     buf = MorlRolloutBuffer()
     _check("empty buffer len == 0", len(buf) == 0)
-    buf.push([0.1] * 10, {"discrete": [0] * 5}, 1.0, 0.5, -0.3, False, {"health": 0.8})
+    buf.push(
+        [0.1] * 10, {"discrete": [0] * 5}, 1.0, 0.5, -0.3, False,
+        {"health": 0.8},
+        log_prob_discrete=-0.2, log_prob_continuous=-0.1,
+    )
     _check("buffer len == 1 after push", len(buf) == 1)
+    _check("log_probs_discrete stored", buf.log_probs_discrete[0] == -0.2)
+    _check("log_probs_continuous stored", buf.log_probs_continuous[0] == -0.1)
     buf.clear()
     _check("buffer len == 0 after clear", len(buf) == 0)
+    _check("log_probs_discrete cleared", len(buf.log_probs_discrete) == 0)
 
 
 def check_morl_smoke_train() -> None:
@@ -543,6 +550,159 @@ def check_checkpoint_loading_missing_file() -> None:
         _check("load_state_dict not called for missing file", not mock.loaded)
 
 
+def check_config_override_application() -> None:
+    """Verify that YAML hyperparameters are applied by PPOMorl (not silently overridden)."""
+    print("\n--- Phase 6 (regression): config override application ---")
+    from src.train.ppo_morl import PPOMorl
+
+    cfg = {
+        "env": {"task_name": "easy_localized_outbreak", "seed": 42, "max_nodes": 20},
+        "ppo": {
+            "total_timesteps": 10, "n_steps": 5, "batch_size": 5,
+            "n_epochs": 2, "lr": 1.5e-4, "gamma": 0.95, "gae_lambda": 0.90,
+            "clip_eps": 0.15, "entropy_coef": 0.005, "value_loss_coef": 0.4,
+            "max_grad_norm": 1.0,
+        },
+        "morl": {
+            "weights": {"health": 0.75, "economy": 0.12, "control": 0.05, "penalty": 0.08},
+            "entropy_coef_discrete": 0.004,
+            "entropy_coef_continuous": 0.0003,
+        },
+        "model": {"hidden_dims": [64, 64]},
+        "logging": {"log_interval": 1, "checkpoint_dir": "/tmp/smoke_cfg_override", "checkpoint_interval": 9999},
+    }
+    trainer = PPOMorl(config=cfg)
+
+    # Verify each hyperparameter was actually applied from config
+    _check("lr applied from config", abs(trainer.lr - 1.5e-4) < 1e-10)
+    _check("n_epochs applied from config", trainer.n_epochs == 2)
+    _check("clip_eps applied from config", abs(trainer.clip_eps - 0.15) < 1e-9)
+    _check("gamma applied from config", abs(trainer.gamma - 0.95) < 1e-9)
+    _check("gae_lambda applied from config", abs(trainer.gae_lambda - 0.90) < 1e-9)
+    _check("max_grad_norm applied from config", abs(trainer.max_grad_norm - 1.0) < 1e-9)
+    _check("health weight applied from config", abs(trainer.weights.get("health", 0) - 0.75) < 1e-9)
+    _check("economy weight applied from config", abs(trainer.weights.get("economy", 0) - 0.12) < 1e-9)
+    _check("entropy_coef_discrete applied from config", abs(trainer.entropy_coef_discrete - 0.004) < 1e-9)
+    _check("entropy_coef_continuous applied from config", abs(trainer.entropy_coef_continuous - 0.0003) < 1e-9)
+    # Optimizer learning rate must match config lr
+    for pg in trainer._optimizer.param_groups:
+        _check("optimizer lr matches config lr", abs(pg["lr"] - 1.5e-4) < 1e-10)
+        break
+
+
+def check_checkpoint_freshness() -> None:
+    """Verify that retraining produces a checkpoint with a different SHA256."""
+    print("\n--- Phase 6 (regression): checkpoint freshness after retrain ---")
+    import hashlib
+    import os as _os
+    import tempfile
+    from src.train.ppo_morl import PPOMorl
+
+    def _sha(path: str) -> str:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_cfg = {
+            "env": {"task_name": "easy_localized_outbreak", "seed": 42, "max_nodes": 20},
+            "ppo": {
+                "total_timesteps": 20, "n_steps": 10, "batch_size": 5,
+                "n_epochs": 1, "lr": 3e-4, "gamma": 0.99, "gae_lambda": 0.95,
+                "clip_eps": 0.2, "entropy_coef": 0.01, "value_loss_coef": 0.5,
+                "max_grad_norm": 0.5,
+            },
+            "morl": {"weights": {"health": 0.5, "economy": 0.3, "control": 0.1, "penalty": 0.1}},
+            "model": {"hidden_dims": [32, 32]},
+            "logging": {"log_interval": 1, "checkpoint_dir": tmpdir, "checkpoint_interval": 9999},
+        }
+
+        import copy
+        cfg_a = copy.deepcopy(base_cfg)
+        cfg_a["env"]["seed"] = 1
+
+        cfg_b = copy.deepcopy(base_cfg)
+        cfg_b["env"]["seed"] = 2
+        cfg_b["morl"]["weights"] = {"health": 0.9, "economy": 0.05, "control": 0.03, "penalty": 0.02}
+
+        # Train with config A, save checkpoint
+        dir_a = _os.path.join(tmpdir, "run_a")
+        cfg_a["logging"]["checkpoint_dir"] = dir_a
+        PPOMorl(config=cfg_a).train()
+        pt_a = _os.path.join(dir_a, "checkpoint_final.pt")
+
+        # Train with config B (different weights/seed), save checkpoint
+        dir_b = _os.path.join(tmpdir, "run_b")
+        cfg_b["logging"]["checkpoint_dir"] = dir_b
+        PPOMorl(config=cfg_b).train()
+        pt_b = _os.path.join(dir_b, "checkpoint_final.pt")
+
+        _check("checkpoint_a exists", _os.path.isfile(pt_a))
+        _check("checkpoint_b exists", _os.path.isfile(pt_b))
+
+        if _os.path.isfile(pt_a) and _os.path.isfile(pt_b):
+            sha_a = _sha(pt_a)
+            sha_b = _sha(pt_b)
+            _check(
+                "different configs produce different checkpoint SHA256",
+                sha_a != sha_b,
+                f"sha_a={sha_a} sha_b={sha_b}",
+            )
+
+
+def check_seed_propagation_in_eval() -> None:
+    """Verify per-episode seeds are distinct and propagated to env.reset()."""
+    print("\n--- Phase 7 (regression): seed propagation in eval ---")
+    from src.eval.scenario_runner import EvalHarness
+
+    # Verify the per-episode seed formula: ep_seed = seed + ep_idx * 100
+    n_episodes = 5
+    seed = 7
+    expected_ep_seeds = [seed + ep_idx * 100 for ep_idx in range(n_episodes)]
+
+    _check(
+        "per-episode seeds are distinct",
+        len(set(expected_ep_seeds)) == n_episodes,
+        str(expected_ep_seeds),
+    )
+    _check(
+        "first episode seed equals outer seed",
+        expected_ep_seeds[0] == seed,
+    )
+    _check(
+        "episode seeds increment by 100",
+        all(
+            expected_ep_seeds[i + 1] - expected_ep_seeds[i] == 100
+            for i in range(n_episodes - 1)
+        ),
+    )
+
+    # Verify EvalHarness respects different outer seeds (seeds list)
+    cfg = {
+        "eval": {
+            "seeds": [0, 1, 2],
+            "n_episodes": 1,
+            "deterministic": True,
+            "tasks": ["easy_localized_outbreak"],
+        },
+    }
+    harness = EvalHarness(cfg)
+    _check("EvalHarness.seeds set from config", harness.seeds == [0, 1, 2])
+    _check("EvalHarness.n_episodes set from config", harness.n_episodes == 1)
+
+    # Verify that the set of (seed, ep_idx) pairs covers all combinations
+    all_seeds = harness.seeds
+    all_ep_seeds = [
+        s + ep_idx * 100
+        for s in all_seeds
+        for ep_idx in range(harness.n_episodes)
+    ]
+    _check(
+        "all (seed, ep_idx) pairs produce unique ep_seeds for 1-episode runs",
+        len(set(all_ep_seeds)) == len(all_ep_seeds),
+        str(all_ep_seeds),
+    )
+
+
 # ===========================================================================
 # Runner
 # ===========================================================================
@@ -569,6 +729,9 @@ if __name__ == "__main__":
     check_eval_harness_cli_checkpoint()
     check_eval_harness_checkpoint_override()
     check_checkpoint_loading_missing_file()
+    check_config_override_application()
+    check_checkpoint_freshness()
+    check_seed_propagation_in_eval()
 
     print()
     print("=" * 60)

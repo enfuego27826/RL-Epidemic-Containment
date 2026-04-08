@@ -235,7 +235,17 @@ def _load_checkpoint(policy: Any, checkpoint_path: str) -> bool:
 
     try:
         policy.load_state_dict(state_dict)
-        logger.info("Checkpoint loaded: %s", resolved)
+        # Log SHA256, mtime, and key metadata so callers can verify freshness
+        import hashlib
+        import os as _os
+        sha = hashlib.sha256(Path(checkpoint_path).read_bytes()).hexdigest()[:16]
+        mtime = _os.path.getmtime(checkpoint_path)
+        import datetime
+        mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(
+            "Checkpoint loaded: %s  sha256=%s  mtime=%s  global_step=%s",
+            resolved, sha, mtime_str, ckpt.get("global_step", "unknown"),
+        )
         return True
     except Exception as exc:
         logger.error(
@@ -268,6 +278,12 @@ class EvalHarness:
         self.lag_steps = int(config.get("lag", {}).get("steps", 0))
         self.max_nodes = int(config.get("env", {}).get("max_nodes", 20))
         self._checkpoint_path = eval_cfg.get("checkpoint_path")
+        logger.info(
+            "EvalHarness config: tasks=%s n_episodes=%d seeds=%s "
+            "deterministic=%s checkpoint=%s",
+            self.tasks, self.n_episodes, self.seeds,
+            self.deterministic, self._checkpoint_path or "(none — random init)",
+        )
 
     def run(self) -> list[EpisodeResult]:
         """Run evaluation across all tasks and seeds.
@@ -308,6 +324,10 @@ class EvalHarness:
         # Load checkpoint weights if a path was provided
         if self._checkpoint_path:
             _load_checkpoint(policy, self._checkpoint_path)
+
+        # Log first-action distribution to confirm the policy is responding
+        # to the loaded weights (not just random init).
+        self._log_action_distribution(policy, task_name, seed)
 
         # Reset episode state for ST models
         if hasattr(policy, "reset_episode"):
@@ -368,6 +388,43 @@ class EvalHarness:
             ))
 
         return results
+
+    def _log_action_distribution(
+        self, policy: Any, task_name: str, seed: int
+    ) -> None:
+        """Log a sample action distribution to confirm the policy is active.
+
+        Uses a zero observation vector as a probe input so the log is
+        deterministic and independent of env state; the point is only to
+        show that the loaded policy produces non-trivial logits.
+        """
+        try:
+            import torch
+            from src.models.actor_critic import HybridActorCritic, ActorCritic
+            from src.models.st_encoder import STActorCritic
+
+            obs_dim = self.max_nodes * 4 + 4
+            probe_obs = [0.0] * obs_dim
+
+            if isinstance(policy, (HybridActorCritic, ActorCritic)):
+                with torch.no_grad():
+                    obs_t = torch.tensor(probe_obs, dtype=torch.float32)
+                    disc_logits_t, _, _ = policy._forward_tensor(obs_t)
+                    # Mean softmax prob across all nodes
+                    probs = torch.softmax(disc_logits_t, dim=-1)
+                    mean_probs = probs.mean(dim=0).tolist()  # (action_dim,)
+                logger.info(
+                    "Action distribution probe  task=%s seed=%d  "
+                    "mean_probs(noop/quar/lift/vax)=[%.3f, %.3f, %.3f, %.3f]",
+                    task_name, seed, *mean_probs[:4],
+                )
+            elif isinstance(policy, STActorCritic):
+                logger.info(
+                    "Action distribution probe skipped for STActorCritic "
+                    "(requires reset_episode state)."
+                )
+        except Exception as exc:
+            logger.debug("Action distribution probe failed (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Reporting
