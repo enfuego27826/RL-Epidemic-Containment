@@ -79,7 +79,10 @@ class EpidemicContainmentStrategyEnv:
             self._apply_intervention(intervention, errors)
 
         engine_result = self.engine.step()
-        reward = self._compute_reward(previous_metrics, engine_result, len(errors))
+        reward_components = self._compute_reward_components(
+            previous_metrics, engine_result, len(errors)
+        )
+        reward = round(sum(reward_components.values()), 6)
         self._done = bool(engine_result["done"])
 
         history_entry = StepHistoryEntry(
@@ -112,6 +115,10 @@ class EpidemicContainmentStrategyEnv:
             "task_score": self._last_evaluation.score,
             "task_success": self._last_evaluation.success,
             "metrics": self._last_evaluation.metrics,
+            "reward_health": round(reward_components["reward_health"], 6),
+            "reward_economy": round(reward_components["reward_economy"], 6),
+            "reward_control": round(reward_components["reward_control"], 6),
+            "reward_penalty": round(reward_components["reward_penalty"], 6),
         }
         return observation, reward, self._done, info
 
@@ -302,13 +309,12 @@ class EpidemicContainmentStrategyEnv:
             "global_economic_score": self.engine.global_economic_score(),
         }
 
-    def _compute_reward(
+    def _compute_reward_components(
         self,
         previous_metrics: dict[str, Any],
         current_metrics: dict[str, Any],
         error_count: int,
-    ) -> float:
-        reward = 0.0
+    ) -> dict[str, float]:
         infection_delta = (
             previous_metrics["actual_total_infection_rate"]
             - current_metrics["actual_total_infection_rate"]
@@ -317,23 +323,27 @@ class EpidemicContainmentStrategyEnv:
             current_metrics["global_economic_score"]
             - previous_metrics["global_economic_score"]
         )
-
-        reward += 8.0 * infection_delta
-        reward += 2.5 * economy_delta
-
+        reward_health = 8.0 * infection_delta
+        reward_economy = 2.5 * economy_delta
+        reward_control = 0.0
         if (
             current_metrics["actual_total_infection_rate"]
             <= previous_metrics["actual_total_infection_rate"] + 1e-6
             and current_metrics["global_economic_score"] > 0.50
         ):
-            reward += 1.0
-
-        reward -= 1.25 * len(current_metrics["severe_node_ids"])
-        reward -= 1.00 * len(current_metrics["collapsed_node_ids"])
-        reward -= 0.35 * len(current_metrics["unnecessary_quarantine_node_ids"])
-        reward -= 0.25 * error_count
-        return round(reward, 6)
-
+            reward_control = 1.0
+        reward_penalty = (
+            -1.25 * len(current_metrics["severe_node_ids"])
+            - 1.00 * len(current_metrics["collapsed_node_ids"])
+            - 0.35 * len(current_metrics["unnecessary_quarantine_node_ids"])
+            - 0.25 * error_count
+        )
+        return {
+            "reward_health": reward_health,
+            "reward_economy": reward_economy,
+            "reward_control": reward_control,
+            "reward_penalty": reward_penalty,
+        }
 
 class OpenEnvEpidemicContainmentEnv(
     Environment[EpidemicAction, EpidemicObservation, EpidemicState]
