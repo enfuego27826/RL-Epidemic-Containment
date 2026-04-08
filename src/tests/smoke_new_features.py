@@ -23,6 +23,11 @@ import math
 import sys
 from pathlib import Path
 
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -173,7 +178,6 @@ def check_ppo_lr_schedule() -> None:
            abs(sum(buf.advantages) / max(len(buf.advantages), 1)) < 0.1)
 
     # Test next_obs bootstrapping path (when last transition is non-terminal)
-    import torch
     for i in range(T):
         buf.rewards[i] = 0.0
         buf.values[i] = 0.0

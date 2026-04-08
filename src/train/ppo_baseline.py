@@ -418,7 +418,8 @@ class PPOBaseline:
         next_value = 0.0
         if T > 0 and next_obs is not None and not self._buffer.dones[-1]:
             try:
-                next_obs_t = torch.tensor(next_obs, dtype=torch.float32)
+                device = next(self._policy.parameters()).device
+                next_obs_t = torch.tensor(next_obs, dtype=torch.float32, device=device)
                 with torch.no_grad():
                     if self.hybrid_mode:
                         _, _, next_value_t = self._policy._forward_tensor(next_obs_t)
