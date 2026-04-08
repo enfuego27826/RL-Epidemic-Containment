@@ -303,9 +303,9 @@ def check_adapter_reward_components() -> None:
         _check("step_info has reward_health", "reward_health" in step_info)
         _check("step_info has reward_economy", "reward_economy" in step_info)
         _check("step_info has global_economic_score", "global_economic_score" in step_info)
-        if abs(float(step_info.get("reward_economy", 0.0))) > 1e-12:
+        if abs(float(step_info.get("reward_economy", 0.0))) > 1e-9:
             seen_non_zero_economy = True
-        if abs(float(step_info.get("reward_health", 0.0))) > 1e-12:
+        if abs(float(step_info.get("reward_health", 0.0))) > 1e-9:
             seen_non_zero_health = True
         if done:
             break

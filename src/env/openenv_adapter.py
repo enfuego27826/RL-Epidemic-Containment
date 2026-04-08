@@ -84,6 +84,11 @@ NUM_DISCRETE_ACTIONS: int = 4
 
 # Minimum amount treated as a meaningful vaccine dose (continuous head)
 _MIN_VACCINE_AMOUNT: float = 1e-4
+# Mirror env.py reward decomposition coefficients:
+#   reward += 8.0 * infection_delta + 2.5 * economy_delta + ...
+# These are exposed here for per-step diagnostics / MORL decomposition logging.
+HEALTH_REWARD_COEFFICIENT: float = 8.0
+ECONOMY_REWARD_COEFFICIENT: float = 2.5
 
 
 class OpenEnvAdapter:
@@ -242,6 +247,9 @@ class OpenEnvAdapter:
         info:
             Dict forwarded from the underlying env plus ``"node_ids"`` and
             Phase 2 diagnostics (``"invalid_action_count"``, ``"invalid_action_rate"``).
+            Also includes ``reward_health`` and ``reward_economy`` terms
+            reconstructed from infection/economy deltas; these are partial
+            decomposition terms and do not necessarily sum to scalar reward.
         """
         epidemic_action = self._action_to_epidemic(action)
         prev_global_economic_score = (
@@ -265,9 +273,11 @@ class OpenEnvAdapter:
         info["node_ids"] = self._node_ids
         info["global_economic_score"] = curr_global_economic_score
         info["actual_total_infection_rate"] = curr_actual_infection_rate
-        # Decomposed reward diagnostics (matches env reward coefficients).
-        info["reward_health"] = 8.0 * infection_delta
-        info["reward_economy"] = 2.5 * economy_delta
+        # Decomposed reward diagnostics (matches env.py coefficient terms for
+        # infection/economy deltas). Full scalar reward also includes bonuses
+        # and penalties in env.py, so these fields are partial decomposition.
+        info["reward_health"] = HEALTH_REWARD_COEFFICIENT * infection_delta
+        info["reward_economy"] = ECONOMY_REWARD_COEFFICIENT * economy_delta
         info["economy_score"] = curr_global_economic_score
         info["invalid_action_count"] = self._invalid_action_count
         info["invalid_action_rate"] = (

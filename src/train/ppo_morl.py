@@ -62,6 +62,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 logger = logging.getLogger(__name__)
 
+# Used when only economy score levels are available: derive reward_economy from
+# score delta and align scale with env.py reward coefficient.
+ECONOMY_DELTA_SCALE = 2.5
+# Log decomposition key usage for the first few steps only, to keep logs concise
+# while still making key routing transparent at startup.
+DECOMPOSITION_DIAG_LOG_STEPS = 5
+
 
 # ---------------------------------------------------------------------------
 # RewardDecomposer
@@ -87,6 +94,7 @@ class RewardDecomposer:
     def __init__(
         self,
         weights: dict[str, float] | None = None,
+        economy_delta_scale: float = ECONOMY_DELTA_SCALE,
     ) -> None:
         self.weights = weights or {
             "health": 1.0,
@@ -94,13 +102,15 @@ class RewardDecomposer:
             "control": 0.0,
             "penalty": -1.0,
         }
-        self._economy_delta_scale = 2.5
+        self._economy_delta_scale = float(economy_delta_scale)
+        if self._economy_delta_scale <= 0.0:
+            raise ValueError("economy_delta_scale must be positive.")
         # Episode-level accumulators
         self._ep_components: dict[str, list[float]] = {k: [] for k in self.weights}
         # Multi-episode log
         self._history: list[dict[str, float]] = []
         self._steps_seen = 0
-        self._diag_log_steps = 5
+        self._diag_log_steps = DECOMPOSITION_DIAG_LOG_STEPS
         self._key_usage: dict[str, dict[str, int]] = {
             k: {} for k in self.weights
         }
@@ -166,10 +176,18 @@ class RewardDecomposer:
         if economy_key is None and economy_score_key is not None:
             if self._prev_economy_score is None:
                 economy = 0.0
+                economy_key = f"{economy_score_key}:init"
             else:
                 economy = self._economy_delta_scale * (economy_score - self._prev_economy_score)
-            economy_key = f"{economy_score_key}:delta"
-            derived_from_score = True
+                economy_key = f"{economy_score_key}:delta"
+                derived_from_score = True
+                if abs(economy) > 5.0:
+                    logger.warning(
+                        "Large derived economy component: %.4f (key=%s, scale=%.3f)",
+                        economy,
+                        economy_score_key,
+                        self._economy_delta_scale,
+                    )
         if economy_score_key is not None:
             self._prev_economy_score = economy_score
 
@@ -394,7 +412,10 @@ class PPOMorl:
         )
 
         # Reward decomposer
-        self._decomposer = RewardDecomposer(weights=self.weights)
+        self._decomposer = RewardDecomposer(
+            weights=self.weights,
+            economy_delta_scale=float(morl_cfg.get("economy_delta_scale", ECONOMY_DELTA_SCALE)),
+        )
         self._buffer = MorlRolloutBuffer()
 
         # Metrics
