@@ -103,10 +103,10 @@ def main() -> None:
         elif not _load_checkpoint(policy, weights_path):
             logger.warning(
                 "Failed to load checkpoint weights from %s. "
-                "Verify path, checkpoint integrity, and architecture compatibility.",
+                "Verify path, checkpoint integrity, and architecture compatibility. "
+                "Continuing inference with random policy weights.",
                 weights_path,
             )
-            logger.warning("Continuing inference with random policy weights.")
     elif checkpoint:
         logger.warning("Checkpoint not found: %s — using random weights.", checkpoint)
 
