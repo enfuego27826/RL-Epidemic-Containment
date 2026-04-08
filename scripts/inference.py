@@ -87,7 +87,7 @@ def main() -> None:
 
     checkpoint = args.checkpoint or cfg.get("eval", {}).get("checkpoint_path")
     if checkpoint and os.path.isfile(checkpoint):
-        weights_path: str | None = checkpoint
+        weights_path = checkpoint
         if checkpoint.endswith(".txt"):
             candidate = str(Path(checkpoint).with_suffix(".pt"))
             if os.path.isfile(candidate):
@@ -106,6 +106,7 @@ def main() -> None:
                 "Verify path, checkpoint integrity, and architecture compatibility.",
                 weights_path,
             )
+            logger.warning("Continuing inference with random policy weights.")
     elif checkpoint:
         logger.warning("Checkpoint not found: %s — using random weights.", checkpoint)
 
