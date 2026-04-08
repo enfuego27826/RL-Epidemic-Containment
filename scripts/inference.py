@@ -92,13 +92,18 @@ def main() -> None:
         #   2) legacy metadata text file (.txt) with adjacent same-name .pt
         weights_path = checkpoint
         if checkpoint.endswith(".txt"):
-            candidate = str(Path(checkpoint).with_suffix(".pt"))
-            if os.path.isfile(candidate):
-                weights_path = candidate
+            base_path = Path(checkpoint)
+            candidates = [
+                str(base_path.with_suffix(".pt")),
+                str(base_path.with_suffix(".pth")),
+            ]
+            resolved = next((c for c in candidates if os.path.isfile(c)), None)
+            if resolved is not None:
+                weights_path = resolved
             else:
                 weights_path = ""
                 logger.warning(
-                    "Checkpoint metadata file found but no .pt weights file beside it: %s",
+                    "Checkpoint metadata file found but no adjacent .pt/.pth weights file: %s",
                     checkpoint,
                 )
         if not weights_path:
@@ -107,6 +112,7 @@ def main() -> None:
             logger.warning(
                 "Failed to load checkpoint weights from %s. "
                 "Verify path, checkpoint integrity, and architecture compatibility. "
+                "See earlier checkpoint-loader logs for detailed cause. "
                 "Continuing inference with random policy weights.",
                 weights_path,
             )
