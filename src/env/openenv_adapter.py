@@ -138,6 +138,8 @@ class OpenEnvAdapter:
             "lift": 0,
             "vaccinate": 0,
         }
+        self._prev_global_economic_score: float | None = None
+        self._prev_actual_infection_rate: float | None = None
 
     # ------------------------------------------------------------------
     # OpenEnv conformance assertion
@@ -198,6 +200,8 @@ class OpenEnvAdapter:
         self._total_steps = 0
         self._total_decisions = 0
         self._invalid_by_type = {"quarantine": 0, "lift": 0, "vaccinate": 0}
+        self._prev_global_economic_score = float(self._env.engine.global_economic_score())
+        self._prev_actual_infection_rate = float(self._env.engine.actual_total_infection_rate())
 
         obs_tensor = self._obs_to_tensor(obs_model)
         info: dict[str, Any] = {
@@ -240,11 +244,31 @@ class OpenEnvAdapter:
             Phase 2 diagnostics (``"invalid_action_count"``, ``"invalid_action_rate"``).
         """
         epidemic_action = self._action_to_epidemic(action)
+        prev_global_economic_score = (
+            float(self._prev_global_economic_score)
+            if self._prev_global_economic_score is not None
+            else float(self._env.engine.global_economic_score())
+        )
+        prev_actual_infection_rate = (
+            float(self._prev_actual_infection_rate)
+            if self._prev_actual_infection_rate is not None
+            else float(self._env.engine.actual_total_infection_rate())
+        )
         obs_model, reward, done, info = self._env.step(epidemic_action)
         obs_tensor = self._obs_to_tensor(obs_model)
+        curr_global_economic_score = float(self._env.engine.global_economic_score())
+        curr_actual_infection_rate = float(self._env.engine.actual_total_infection_rate())
+        economy_delta = curr_global_economic_score - prev_global_economic_score
+        infection_delta = prev_actual_infection_rate - curr_actual_infection_rate
         self._total_steps += 1
         self._total_decisions += max(self.num_nodes, 1)
         info["node_ids"] = self._node_ids
+        info["global_economic_score"] = curr_global_economic_score
+        info["actual_total_infection_rate"] = curr_actual_infection_rate
+        # Decomposed reward diagnostics (matches env reward coefficients).
+        info["reward_health"] = 8.0 * infection_delta
+        info["reward_economy"] = 2.5 * economy_delta
+        info["economy_score"] = curr_global_economic_score
         info["invalid_action_count"] = self._invalid_action_count
         info["invalid_action_rate"] = (
             self._invalid_action_count / self._total_decisions
@@ -252,6 +276,8 @@ class OpenEnvAdapter:
         )
         # Per-action-type invalid counts (cumulative for this episode)
         info["invalid_by_type"] = dict(self._invalid_by_type)
+        self._prev_global_economic_score = curr_global_economic_score
+        self._prev_actual_infection_rate = curr_actual_infection_rate
         return obs_tensor, float(reward), bool(done), info
 
     @property

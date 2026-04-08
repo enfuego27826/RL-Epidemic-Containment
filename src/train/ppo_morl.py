@@ -19,7 +19,8 @@ contains reward-component keys where available.  ``PPOMorl`` extracts:
   - ``"reward_control"``:   quarantine / vaccine efficiency component
   - ``"reward_penalty"``:   invalid-action / constraint penalties
 
-Fallback: if keys are absent, the scalar reward is used for all components.
+Fallback: if no decomposition keys are present, the scalar reward is assigned
+to ``health`` only; additionally, economy can be derived from score deltas.
 
 Scalarization
 -------------
@@ -75,7 +76,13 @@ class RewardDecomposer:
         Scalarization weights for each component.
     """
 
-    COMPONENT_KEYS = ("reward_health", "reward_economy", "reward_control", "reward_penalty")
+    COMPONENT_KEY_FALLBACKS = {
+        "health": ("reward_health", "health_reward", "health"),
+        "economy": ("reward_economy", "economy_reward", "economy"),
+        "control": ("reward_control", "control_reward", "control"),
+        "penalty": ("reward_penalty", "penalty_reward", "penalty"),
+    }
+    ECONOMY_SCORE_KEYS = ("economy_score", "global_economic_score")
 
     def __init__(
         self,
@@ -87,10 +94,38 @@ class RewardDecomposer:
             "control": 0.0,
             "penalty": -1.0,
         }
+        self._economy_delta_scale = 2.5
         # Episode-level accumulators
         self._ep_components: dict[str, list[float]] = {k: [] for k in self.weights}
         # Multi-episode log
         self._history: list[dict[str, float]] = []
+        self._steps_seen = 0
+        self._diag_log_steps = 5
+        self._key_usage: dict[str, dict[str, int]] = {
+            k: {} for k in self.weights
+        }
+        self._missing_component_counts: dict[str, int] = {
+            k: 0 for k in self.weights
+        }
+        self._prev_economy_score: float | None = None
+
+    @staticmethod
+    def _extract_float(info: dict[str, Any], keys: tuple[str, ...]) -> tuple[float, str | None]:
+        """Return first available float-convertible key from info."""
+        for key in keys:
+            if key not in info:
+                continue
+            try:
+                return float(info[key]), key
+            except (TypeError, ValueError):
+                continue
+        return 0.0, None
+
+    def _record_usage(self, component: str, key_used: str | None) -> None:
+        key = key_used or "__missing__"
+        usage = self._key_usage.get(component, {})
+        usage[key] = usage.get(key, 0) + 1
+        self._key_usage[component] = usage
 
     def decompose(self, reward: float, info: dict[str, Any]) -> dict[str, float]:
         """Extract reward components from the info dict.
@@ -110,14 +145,44 @@ class RewardDecomposer:
         components:
             Dict mapping component names to float values.
         """
-        health = float(info.get("reward_health", 0.0))
-        economy = float(info.get("reward_economy", 0.0))
-        control = float(info.get("reward_control", 0.0))
-        penalty = float(info.get("reward_penalty", 0.0))
+        self._steps_seen += 1
+        health, health_key = self._extract_float(
+            info, self.COMPONENT_KEY_FALLBACKS["health"]
+        )
+        economy, economy_key = self._extract_float(
+            info, self.COMPONENT_KEY_FALLBACKS["economy"]
+        )
+        control, control_key = self._extract_float(
+            info, self.COMPONENT_KEY_FALLBACKS["control"]
+        )
+        penalty, penalty_key = self._extract_float(
+            info, self.COMPONENT_KEY_FALLBACKS["penalty"]
+        )
 
-        # If no decomposition info, attribute full reward to health
-        if health == 0.0 and economy == 0.0 and control == 0.0 and penalty == 0.0:
+        # Backward-compatible economy derivation from score deltas when explicit
+        # economy reward keys are absent.
+        derived_from_score = False
+        economy_score, economy_score_key = self._extract_float(info, self.ECONOMY_SCORE_KEYS)
+        if economy_key is None and economy_score_key is not None:
+            if self._prev_economy_score is None:
+                economy = 0.0
+            else:
+                economy = self._economy_delta_scale * (economy_score - self._prev_economy_score)
+            economy_key = f"{economy_score_key}:delta"
+            derived_from_score = True
+        if economy_score_key is not None:
+            self._prev_economy_score = economy_score
+
+        found_component = (
+            health_key is not None
+            or economy_key is not None
+            or control_key is not None
+            or penalty_key is not None
+        )
+        # If no decomposition info at all, attribute full reward to health.
+        if not found_component:
             health = reward
+            health_key = "__fallback_full_reward__"
 
         components = {
             "health": health,
@@ -125,6 +190,33 @@ class RewardDecomposer:
             "control": control,
             "penalty": penalty,
         }
+        key_map = {
+            "health": health_key,
+            "economy": economy_key,
+            "control": control_key,
+            "penalty": penalty_key,
+        }
+        for component, key_used in key_map.items():
+            self._record_usage(component, key_used)
+            if key_used is None:
+                self._missing_component_counts[component] += 1
+
+        if self._steps_seen <= self._diag_log_steps:
+            logger.info(
+                "decompose step=%d keys health=%s economy=%s control=%s penalty=%s",
+                self._steps_seen,
+                health_key or "missing",
+                economy_key or "missing",
+                control_key or "missing",
+                penalty_key or "missing",
+            )
+            if derived_from_score:
+                logger.info(
+                    "decompose step=%d derived economy from %s delta (scale=%.3f)",
+                    self._steps_seen,
+                    economy_score_key,
+                    self._economy_delta_scale,
+                )
         return components
 
     def scalarize(self, components: dict[str, float]) -> float:
@@ -159,6 +251,19 @@ class RewardDecomposer:
     def history(self) -> list[dict[str, float]]:
         """Episode-level history."""
         return list(self._history)
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return decomposition key-usage and missing-component ratios."""
+        steps = max(self._steps_seen, 1)
+        missing_fraction = {
+            k: self._missing_component_counts.get(k, 0) / steps
+            for k in self.weights
+        }
+        return {
+            "steps_seen": self._steps_seen,
+            "key_usage": {k: dict(v) for k, v in self._key_usage.items()},
+            "missing_fraction": missing_fraction,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -354,11 +459,13 @@ class PPOMorl:
 
                     if self._update_count % self.log_interval == 0:
                         logger.info(
-                            "step=%d ep_return=%.2f health_sum=%.3f economy_sum=%.3f",
+                            "step=%d ep_return=%.2f health_sum=%.3f economy_sum=%.3f control_sum=%.3f penalty_sum=%.3f",
                             self._global_step,
                             ep_return,
                             ep_stats.get("ep_health_sum", 0.0),
                             ep_stats.get("ep_economy_sum", 0.0),
+                            ep_stats.get("ep_control_sum", 0.0),
+                            ep_stats.get("ep_penalty_sum", 0.0),
                         )
 
                     obs, _ = self._env.reset()
@@ -466,3 +573,9 @@ class PPOMorl:
                 last.get("ep_control_sum", 0.0),
                 last.get("ep_penalty_sum", 0.0),
             )
+        diag = self._decomposer.diagnostics()
+        logger.info(
+            "Decomposition diagnostics: steps=%d missing_fraction=%s",
+            diag.get("steps_seen", 0),
+            diag.get("missing_fraction", {}),
+        )
