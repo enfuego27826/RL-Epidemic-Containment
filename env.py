@@ -82,12 +82,12 @@ class EpidemicContainmentStrategyEnv:
         reward_components = self._compute_reward_components(
             previous_metrics, engine_result, len(errors)
         )
-        reward = (
+        reward = round((
             reward_components["reward_health"]
             + reward_components["reward_economy"]
             + reward_components["reward_control"]
             + reward_components["reward_penalty"]
-        )
+        ), 6)
         self._done = bool(engine_result["done"])
 
         history_entry = StepHistoryEntry(
@@ -120,10 +120,10 @@ class EpidemicContainmentStrategyEnv:
             "task_score": self._last_evaluation.score,
             "task_success": self._last_evaluation.success,
             "metrics": self._last_evaluation.metrics,
-            "reward_health": reward_components["reward_health"],
-            "reward_economy": reward_components["reward_economy"],
-            "reward_control": reward_components["reward_control"],
-            "reward_penalty": reward_components["reward_penalty"],
+            "reward_health": round(reward_components["reward_health"], 6),
+            "reward_economy": round(reward_components["reward_economy"], 6),
+            "reward_control": round(reward_components["reward_control"], 6),
+            "reward_penalty": round(reward_components["reward_penalty"], 6),
         }
         return observation, reward, self._done, info
 
@@ -344,10 +344,10 @@ class EpidemicContainmentStrategyEnv:
             - 0.25 * error_count
         )
         return {
-            "reward_health": round(reward_health, 6),
-            "reward_economy": round(reward_economy, 6),
-            "reward_control": round(reward_control, 6),
-            "reward_penalty": round(reward_penalty, 6),
+            "reward_health": reward_health,
+            "reward_economy": reward_economy,
+            "reward_control": reward_control,
+            "reward_penalty": reward_penalty,
         }
 
 class OpenEnvEpidemicContainmentEnv(
