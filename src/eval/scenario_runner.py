@@ -279,6 +279,14 @@ class EvalHarness:
 
             mean_economy = econ_sum / max(steps * max(env.num_nodes, 1), 1)
             invalid_rate = float(step_info.get("invalid_action_rate", 0.0))
+            # Defensive clamp: rate must be in [0, 1] (fraction of decisions).
+            if invalid_rate > 1.0:
+                logger.warning(
+                    "invalid_action_rate=%.4f exceeds 1.0 for task=%s seed=%d ep=%d; "
+                    "clamping to 1.0.  Check denominator in OpenEnvAdapter.",
+                    invalid_rate, task_name, seed, ep_idx,
+                )
+                invalid_rate = min(invalid_rate, 1.0)
 
             results.append(EpisodeResult(
                 task_name=task_name,
@@ -326,7 +334,7 @@ class EvalHarness:
             returns = [r.ep_return for r in task_results]
             peak_infs = [r.peak_infection for r in task_results]
             economies = [r.mean_economy for r in task_results]
-            inv_rates = [r.invalid_action_rate * 100 for r in task_results]
+            inv_rates = [min(r.invalid_action_rate, 1.0) * 100 for r in task_results]
 
             def _fmt_mean_std(vals: list[float]) -> str:
                 m = sum(vals) / max(len(vals), 1)

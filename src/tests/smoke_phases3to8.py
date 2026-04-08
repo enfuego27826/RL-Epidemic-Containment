@@ -274,6 +274,52 @@ def check_morl_smoke_train() -> None:
 # Phase 7 — Evaluation Harness
 # ===========================================================================
 
+def check_invalid_action_rate_bounds() -> None:
+    """Unit test: invalid_action_rate must stay in [0, 1] regardless of num_nodes.
+
+    This guards against the bug where the rate was computed as
+    ``invalid_action_count / total_steps`` instead of
+    ``invalid_action_count / (total_steps * num_nodes)``, which caused
+    Inv% to exceed 100 in multi-node tasks.
+    """
+    print("\n--- Phase 7 (regression): invalid_action_rate bounded in [0,1] ---")
+    from src.env.openenv_adapter import OpenEnvAdapter
+
+    adapter = OpenEnvAdapter(task_name="easy_localized_outbreak", seed=42, max_nodes=20)
+    obs, _info = adapter.reset(seed=42)
+
+    # Force worst-case invalid actions by using all-quarantine (most nodes not already
+    # quarantined) or all-lift (most nodes not quarantined → invalid lift).
+    # A list of ACTION_LIFT (2) for all nodes is almost always invalid at step 0.
+    num_nodes = adapter.num_nodes
+    all_lift_action = [2] * num_nodes  # lift on non-quarantined → invalid per node
+
+    max_steps = 30
+    for _ in range(max_steps):
+        obs, _reward, done, step_info = adapter.step(all_lift_action)
+        rate = step_info["invalid_action_rate"]
+        _check(
+            "invalid_action_rate <= 1.0 after step",
+            rate <= 1.0,
+            f"got {rate:.4f}",
+        )
+        _check(
+            "invalid_action_rate >= 0.0 after step",
+            rate >= 0.0,
+            f"got {rate:.4f}",
+        )
+        if done:
+            break
+
+    # Final rate check
+    final_rate = step_info["invalid_action_rate"]
+    _check(
+        "final invalid_action_rate in [0,1]",
+        0.0 <= final_rate <= 1.0,
+        f"got {final_rate:.4f}",
+    )
+
+
 def check_eval_harness() -> None:
     print("\n--- Phase 7: EvalHarness ---")
     from src.eval.scenario_runner import EvalHarness, aggregate_results
@@ -295,9 +341,28 @@ def check_eval_harness() -> None:
     _check("result ep_return finite", _finite(results[0].ep_return))
     _check("result peak_infection in [0,1]", 0 <= results[0].peak_infection <= 1)
 
+    # --- Inv% regression guard ---
+    for r in results:
+        _check(
+            "invalid_action_rate in [0, 1]",
+            0.0 <= r.invalid_action_rate <= 1.0,
+            f"got {r.invalid_action_rate:.4f} for task={r.task_name} seed={r.seed}",
+        )
+    inv_pct = sum(r.invalid_action_rate for r in results) / max(len(results), 1) * 100
+    _check(
+        "mean Inv% <= 100",
+        inv_pct <= 100.0,
+        f"got {inv_pct:.2f}%",
+    )
+
     agg = aggregate_results(results)
     _check("aggregate has return stats", "return" in agg)
     _check("aggregate return.mean finite", _finite(agg["return"]["mean"]))
+    _check(
+        "aggregate invalid_action_rate.max <= 1",
+        agg["invalid_action_rate"]["max"] <= 1.0,
+        f"got {agg['invalid_action_rate']['max']:.4f}",
+    )
 
     # Test save to JSON
     import tempfile
@@ -369,6 +434,7 @@ if __name__ == "__main__":
     check_reward_decomposer()
     check_morl_buffer()
     check_morl_smoke_train()
+    check_invalid_action_rate_bounds()
     check_eval_harness()
     check_scripts_importable()
     check_inference_script()
