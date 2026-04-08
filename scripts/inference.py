@@ -89,7 +89,7 @@ def main() -> None:
     if checkpoint and os.path.isfile(checkpoint):
         weights_path = checkpoint
         if checkpoint.endswith(".txt"):
-            candidate = checkpoint[:-4] + ".pt"
+            candidate = str(Path(checkpoint).with_suffix(".pt"))
             if os.path.isfile(candidate):
                 weights_path = candidate
             else:
@@ -99,7 +99,11 @@ def main() -> None:
                 )
         loaded = _load_checkpoint(policy, weights_path)
         if not loaded:
-            logger.warning("Failed to load checkpoint weights from: %s", weights_path)
+            logger.warning(
+                "Failed to load checkpoint weights from %s. "
+                "Verify path, checkpoint integrity, and architecture compatibility.",
+                weights_path,
+            )
     elif checkpoint:
         logger.warning("Checkpoint not found: %s — using random weights.", checkpoint)
 
