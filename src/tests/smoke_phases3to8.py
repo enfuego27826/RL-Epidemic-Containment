@@ -520,20 +520,27 @@ def check_eval_harness_checkpoint_override() -> None:
 def check_checkpoint_loading_missing_file() -> None:
     """Unit test: _load_checkpoint warns gracefully when file does not exist."""
     print("\n--- Phase 8: _load_checkpoint missing-file handling ---")
+    import tempfile
+    import os as _os
     from src.eval.scenario_runner import _load_checkpoint
 
-    # Create a tiny mock policy with load_state_dict to verify it is NOT called.
-    class _MockPolicy:
-        def __init__(self) -> None:
-            self.loaded = False
+    # Create a temporary directory and construct a path that is guaranteed
+    # not to exist (platform-independent).
+    with tempfile.TemporaryDirectory() as tmpdir:
+        nonexistent = _os.path.join(tmpdir, "nonexistent_checkpoint.pt")
 
-        def load_state_dict(self, sd: dict) -> None:
-            self.loaded = True
+        # Create a tiny mock policy with load_state_dict to verify it is NOT called.
+        class _MockPolicy:
+            def __init__(self) -> None:
+                self.loaded = False
 
-    mock = _MockPolicy()
-    result = _load_checkpoint(mock, "/tmp/nonexistent_checkpoint_xyz.pt")
-    _check("missing checkpoint returns False", result is False)
-    _check("load_state_dict not called for missing file", not mock.loaded)
+            def load_state_dict(self, sd: dict) -> None:
+                self.loaded = True
+
+        mock = _MockPolicy()
+        result = _load_checkpoint(mock, nonexistent)
+        _check("missing checkpoint returns False", result is False)
+        _check("load_state_dict not called for missing file", not mock.loaded)
 
 
 # ===========================================================================

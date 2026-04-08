@@ -576,7 +576,7 @@ class PPOMorl:
             f.write(f"morl_weights={self.weights}\n")
 
         # Also persist PyTorch weights so the eval harness can load them.
-        weights_path = path.replace(".txt", ".pt")
+        weights_path = str(Path(path).with_suffix(".pt"))
         try:
             import torch
             torch.save(
