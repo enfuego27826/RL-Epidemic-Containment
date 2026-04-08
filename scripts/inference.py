@@ -87,18 +87,20 @@ def main() -> None:
 
     checkpoint = args.checkpoint or cfg.get("eval", {}).get("checkpoint_path")
     if checkpoint and os.path.isfile(checkpoint):
-        weights_path = checkpoint
+        weights_path: str | None = checkpoint
         if checkpoint.endswith(".txt"):
             candidate = str(Path(checkpoint).with_suffix(".pt"))
             if os.path.isfile(candidate):
                 weights_path = candidate
             else:
+                weights_path = None
                 logger.warning(
                     "Checkpoint metadata file found but no .pt weights file beside it: %s",
                     checkpoint,
                 )
-        loaded = _load_checkpoint(policy, weights_path)
-        if not loaded:
+        if weights_path is None:
+            logger.warning("Skipping checkpoint load and using random weights.")
+        elif not _load_checkpoint(policy, weights_path):
             logger.warning(
                 "Failed to load checkpoint weights from %s. "
                 "Verify path, checkpoint integrity, and architecture compatibility.",
