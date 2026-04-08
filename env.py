@@ -351,24 +351,6 @@ class EpidemicContainmentStrategyEnv:
             "reward_penalty": round(reward_penalty, 6),
         }
 
-    def _compute_reward(
-        self,
-        previous_metrics: dict[str, Any],
-        current_metrics: dict[str, Any],
-        error_count: int,
-    ) -> float:
-        components = self._compute_reward_components(
-            previous_metrics, current_metrics, error_count
-        )
-        reward = (
-            components["reward_health"]
-            + components["reward_economy"]
-            + components["reward_control"]
-            + components["reward_penalty"]
-        )
-        return round(reward, 6)
-
-
 class OpenEnvEpidemicContainmentEnv(
     Environment[EpidemicAction, EpidemicObservation, EpidemicState]
 ):
