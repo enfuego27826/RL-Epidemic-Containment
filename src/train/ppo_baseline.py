@@ -120,6 +120,13 @@ class PPOBaseline:
         self.lr: float = float(ppo_cfg["lr"])
         self.max_grad_norm: float = float(ppo_cfg.get("max_grad_norm", 0.5))
 
+        # ── LR schedule ────────────────────────────────────────────────
+        # Supported schedules: "none" | "linear"
+        # "linear": linearly anneal lr from initial value to lr_final
+        #           over total_timesteps.
+        self.lr_schedule: str = str(ppo_cfg.get("lr_schedule", "none")).lower()
+        self.lr_final: float = float(ppo_cfg.get("lr_final", self.lr * 0.1))
+
         self.log_interval: int = int(config.get("logging", {}).get("log_interval", 10))
         self.checkpoint_dir: str = config.get("logging", {}).get(
             "checkpoint_dir", "checkpoints/baseline"
@@ -181,45 +188,109 @@ class PPOBaseline:
         # Adam optimizer — initialised after the policy is constructed above
         self._optimizer = torch.optim.Adam(self._policy.parameters(), lr=self.lr)
 
+        # ── TensorBoard logger ─────────────────────────────────────────
+        from src.train.tb_logger import TBLogger
+        run_tag = f"seed{self.seed}"
+        self._tb = TBLogger.from_config(config, run_tag=run_tag)
+
     def train(self) -> None:
         """Run the full PPO training loop until ``total_timesteps``."""
         self._set_seeds(self.seed)
         logger.info(
-            "Starting PPO baseline | task=%s seed=%d total_timesteps=%d",
-            self.task_name, self.seed, self.total_timesteps,
+            "Starting PPO baseline | task=%s seed=%d total_timesteps=%d lr_schedule=%s",
+            self.task_name, self.seed, self.total_timesteps, self.lr_schedule,
         )
+        if self._tb.is_active:
+            logger.info("TensorBoard logging active → %s", self._tb.log_dir)
+            logger.info("  Launch with: tensorboard --logdir=%s", self._tb.log_dir)
 
         obs, _ = self._adapter.reset(seed=self.seed)
 
         t_start = time.time()
 
         while self._global_step < self.total_timesteps:
+            # ── Learning-rate schedule ───────────────────────────────────
+            current_lr = self._compute_lr()
+            for pg in self._optimizer.param_groups:
+                pg["lr"] = current_lr
+
             # ── Collect rollout ──────────────────────────────────────────
             obs = self._collect_rollout(obs)
 
             # ── Compute advantages ───────────────────────────────────────
-            self.compute_advantages()
+            adv_stats = self.compute_advantages()
 
             # ── Optimise ────────────────────────────────────────────────
             metrics = self.update_policy()
+            metrics["learning_rate"] = current_lr
+            metrics["adv_mean"] = adv_stats["mean"]
+            metrics["adv_std"] = adv_stats["std"]
+            metrics["explained_variance"] = adv_stats["explained_variance"]
             self._n_updates += 1
 
-            # ── Logging ─────────────────────────────────────────────────
+            # ── TensorBoard + text logging ───────────────────────────────
             if self._n_updates % self.log_interval == 0:
                 elapsed = time.time() - t_start
                 fps = self._global_step / max(elapsed, 1e-8)
+
+                # Text log
                 logger.info(
-                    "update=%d  step=%d  fps=%.0f  "
+                    "update=%d  step=%d  fps=%.0f  lr=%.2e  "
                     "policy_loss=%.4f  value_loss=%.4f  entropy=%.4f  "
-                    "clip_frac=%.3f  approx_kl=%.4f",
+                    "clip_frac=%.3f  approx_kl=%.4f  "
+                    "grad_norm=%.4f  ev=%.3f  adv=%.3f±%.3f",
                     self._n_updates,
                     self._global_step,
                     fps,
+                    current_lr,
                     metrics["policy_loss"],
                     metrics["value_loss"],
                     metrics["entropy"],
                     metrics.get("clip_frac", 0.0),
                     metrics.get("approx_kl", 0.0),
+                    metrics.get("grad_norm", 0.0),
+                    metrics.get("explained_variance", 0.0),
+                    adv_stats["mean"],
+                    adv_stats["std"],
+                )
+
+                # TensorBoard — PPO metrics
+                self._tb.log_scalars("train", {
+                    "policy_loss":        metrics["policy_loss"],
+                    "value_loss":         metrics["value_loss"],
+                    "entropy":            metrics["entropy"],
+                    "clip_frac":          metrics.get("clip_frac", 0.0),
+                    "approx_kl":          metrics.get("approx_kl", 0.0),
+                    "grad_norm":          metrics.get("grad_norm", 0.0),
+                    "explained_variance": metrics.get("explained_variance", 0.0),
+                    "learning_rate":      current_lr,
+                    "fps":                fps,
+                }, self._global_step)
+
+                # TensorBoard — advantage statistics
+                self._tb.log_scalars("advantages", {
+                    "mean": adv_stats["mean"],
+                    "std":  adv_stats["std"],
+                    "min":  adv_stats["min"],
+                    "max":  adv_stats["max"],
+                }, self._global_step)
+
+                # TensorBoard — environment metrics
+                inv_rate = self._adapter._invalid_action_count / max(self._adapter._total_decisions, 1)
+                env_metrics: dict[str, float] = {
+                    "global_step":        float(self._global_step),
+                    "invalid_action_rate": inv_rate,
+                }
+                # Per-action-type invalid rates if adapter exposes them
+                if hasattr(self._adapter, "_invalid_by_type"):
+                    total_d = max(self._adapter._total_decisions, 1)
+                    for atype, cnt in self._adapter._invalid_by_type.items():
+                        env_metrics[f"invalid_{atype}"] = cnt / total_d
+                self._tb.log_scalars("env", env_metrics, self._global_step)
+
+                # Histogram of advantages
+                self._tb.log_histogram(
+                    "advantages/histogram", self._buffer.advantages, self._global_step
                 )
 
             # ── Checkpoint ──────────────────────────────────────────────
@@ -228,6 +299,19 @@ class PPOBaseline:
 
         logger.info("Training complete. Total steps: %d", self._global_step)
         self._save_checkpoint(final=True)
+        self._tb.close()
+
+    # ------------------------------------------------------------------
+    # Learning-rate schedule
+    # ------------------------------------------------------------------
+
+    def _compute_lr(self) -> float:
+        """Compute the current learning rate based on the schedule."""
+        if self.lr_schedule == "linear":
+            progress = self._global_step / max(self.total_timesteps, 1)
+            return self.lr + (self.lr_final - self.lr) * progress
+        # "none" or unknown → constant
+        return self.lr
 
     # ------------------------------------------------------------------
     # Rollout collection
@@ -304,7 +388,7 @@ class PPOBaseline:
     # Advantage computation (GAE)
     # ------------------------------------------------------------------
 
-    def compute_advantages(self, next_obs: list[float] | None = None) -> None:
+    def compute_advantages(self, next_obs: list[float] | None = None) -> dict[str, float]:
         """Compute GAE-lambda advantages and discounted returns.
 
         Stores results in ``self._buffer.advantages`` and
@@ -316,6 +400,13 @@ class PPOBaseline:
             Observation *after* the last rollout step used for value
             bootstrapping.  If ``None``, bootstraps with 0 (treats last
             step as terminal).
+
+        Returns
+        -------
+        stats:
+            Dict with ``mean``, ``std``, ``min``, ``max``, and
+            ``explained_variance`` of the **raw** (pre-normalisation)
+            advantages.  Used for TensorBoard diagnostics.
 
         TODO: pass ``next_obs`` from ``_collect_rollout`` for proper
         bootstrapping when episodes don't end at rollout boundaries.
@@ -339,15 +430,35 @@ class PPOBaseline:
             returns[t] = advantages[t] + self._buffer.values[t]
             next_value = self._buffer.values[t]
 
-        # Normalise advantages
+        # ── Statistics on raw advantages ──────────────────────────────
         adv_mean = sum(advantages) / max(len(advantages), 1)
-        adv_std = math.sqrt(
-            sum((a - adv_mean) ** 2 for a in advantages) / max(len(advantages), 1)
-        )
+        adv_var = sum((a - adv_mean) ** 2 for a in advantages) / max(len(advantages), 1)
+        adv_std = math.sqrt(adv_var)
+        adv_min = min(advantages)
+        adv_max = max(advantages)
+
+        # Explained variance: 1 - Var(returns - values) / Var(returns)
+        values = self._buffer.values
+        ret_mean = sum(returns) / max(len(returns), 1)
+        ret_var = sum((r - ret_mean) ** 2 for r in returns) / max(len(returns), 1)
+        residuals = [r - v for r, v in zip(returns, values)]
+        res_mean = sum(residuals) / max(len(residuals), 1)
+        res_var = sum((r - res_mean) ** 2 for r in residuals) / max(len(residuals), 1)
+        explained_variance = 1.0 - res_var / (ret_var + 1e-8)
+
+        # ── Normalise advantages ───────────────────────────────────────
         self._buffer.advantages = [
             (a - adv_mean) / (adv_std + 1e-8) for a in advantages
         ]
         self._buffer.returns = returns
+
+        return {
+            "mean": adv_mean,
+            "std": adv_std,
+            "min": adv_min,
+            "max": adv_max,
+            "explained_variance": explained_variance,
+        }
 
     # ------------------------------------------------------------------
     # Optimisation step (PyTorch)
@@ -404,6 +515,7 @@ class PPOBaseline:
         total_entropy     = 0.0
         total_clip_frac   = 0.0
         total_approx_kl   = 0.0
+        total_grad_norm   = 0.0
         n_batches = 0
 
         clip_eps = self.clip_eps
@@ -485,7 +597,9 @@ class PPOBaseline:
                     - self.entropy_coef * entropy
                 )
                 loss.backward()
-                nn.utils.clip_grad_norm_(self._policy.parameters(), self.max_grad_norm)
+                grad_norm = nn.utils.clip_grad_norm_(
+                    self._policy.parameters(), self.max_grad_norm
+                ).item()
                 self._optimizer.step()
 
                 total_policy_loss += policy_loss.item()
@@ -493,6 +607,7 @@ class PPOBaseline:
                 total_entropy     += entropy.item()
                 total_clip_frac   += clip_frac
                 total_approx_kl   += approx_kl
+                total_grad_norm   += grad_norm
                 n_batches         += 1
 
         n_batches = max(n_batches, 1)
@@ -502,6 +617,7 @@ class PPOBaseline:
             "entropy":     total_entropy     / n_batches,
             "clip_frac":   total_clip_frac   / n_batches,
             "approx_kl":   total_approx_kl   / n_batches,
+            "grad_norm":   total_grad_norm   / n_batches,
         }
 
     # ------------------------------------------------------------------

@@ -1,0 +1,60 @@
+# Ablation config: ST-GNN + GRU encoder
+# Use this config to run the GNN+GRU encoder ablation experiment.
+#
+# Usage:
+#   python scripts/train.py --config configs/ablation_gnn_gru.yaml
+#   python scripts/run_eval_harness.py --config configs/ablation_gnn_gru.yaml
+#
+# Compare against ablation_mlp.yaml — only encoder_type and model dims differ.
+
+# ── Environment ────────────────────────────────────────────────────────────────
+env:
+  task_name: "medium_multi_center_spread"
+  seed: 42
+  max_nodes: 20
+
+# ── PPO Hyperparameters ────────────────────────────────────────────────────────
+ppo:
+  total_timesteps: 300000
+  n_envs: 1
+  n_steps: 128
+  batch_size: 256
+  n_epochs: 8
+  lr: 3.0e-4
+  lr_schedule: "linear"
+  lr_final: 3.0e-5
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+
+# ── Network Architecture: ST-GNN + GRU encoder ────────────────────────────────
+model:
+  policy_type: "st"
+  encoder_type: "st"            # ← ablation variable (alias: "gnn_gru")
+  hidden_dims: [128, 128]
+  gcn_hidden_dim: 32
+  gru_hidden_dim: 32
+  global_context_dim: 32
+  actor_hidden_dim: 64
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging:
+  log_interval: 10
+  checkpoint_dir: "checkpoints/ablation_gnn_gru"
+  checkpoint_interval: 100
+  tensorboard_enabled: true
+  tensorboard_dir: "runs/ablation_gnn_gru"
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  n_episodes: 5
+  deterministic: true
+  checkpoint_path: null
+  tasks:
+    - "easy_localized_outbreak"
+    - "medium_multi_center_spread"
+    - "hard_asymptomatic_high_density"
+  seeds: [42, 43, 44]

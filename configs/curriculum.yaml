@@ -1,0 +1,113 @@
+# Curriculum Training Configuration
+# Config-driven task progression: easy → medium → hard, with mixed-task sampling
+# and domain randomization hooks.
+#
+# Usage:
+#   python scripts/train.py --config configs/curriculum.yaml
+#   python scripts/train.py --config configs/curriculum.yaml --seed 1
+#
+# Key features:
+#   - Task progression: "sequential" (easy→medium→hard) or "mixed"
+#   - Domain randomization for transmission/reporting lag/compliance
+#   - Per-task timestep budgets
+#
+# Curriculum progression modes
+# ----------------------------
+#   sequential: train on easy for phase_timesteps, then medium, then hard
+#   mixed:      sample tasks according to task_weights at every episode
+#   adaptive:   promote to next task when eval gate passes (requires eval_interval)
+
+# ── Environment ────────────────────────────────────────────────────────────────
+env:
+  task_name: "easy_localized_outbreak"  # starting task for sequential mode
+  seed: 42
+  max_nodes: 20
+
+# ── PPO Hyperparameters ────────────────────────────────────────────────────────
+ppo:
+  total_timesteps: 600000     # total across all curriculum phases
+  n_envs: 1
+  n_steps: 128
+  batch_size: 256
+  n_epochs: 8
+  lr: 3.0e-4
+  lr_schedule: "linear"       # "none" | "linear" — linearly anneal to lr_final
+  lr_final: 3.0e-5
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+
+# ── Network Architecture ───────────────────────────────────────────────────────
+model:
+  policy_type: "baseline"       # baseline | hybrid | st
+  encoder_type: "mlp"           # mlp | st (gnn_gru)
+  hidden_dims: [128, 128]
+  encoder_output_dim: 64
+  # ST-GNN encoder options (used when encoder_type == "st")
+  gcn_hidden_dim: 32
+  gru_hidden_dim: 32
+  global_context_dim: 32
+
+# ── Curriculum Settings ────────────────────────────────────────────────────────
+curriculum:
+  enabled: true
+  mode: "sequential"            # "sequential" | "mixed" | "adaptive"
+
+  # Sequential mode: timestep budget per phase
+  phases:
+    - task: "easy_localized_outbreak"
+      timesteps: 200000
+    - task: "medium_multi_center_spread"
+      timesteps: 200000
+    - task: "hard_asymptomatic_high_density"
+      timesteps: 200000
+
+  # Mixed mode: per-task sampling weights (must sum to 1.0)
+  task_weights:
+    easy_localized_outbreak: 0.4
+    medium_multi_center_spread: 0.35
+    hard_asymptomatic_high_density: 0.25
+
+  # Adaptive mode: evaluate every N updates; advance if gate passes
+  eval_interval_updates: 100    # evaluate every N updates
+  gate_pass_required: true      # must pass eval gate to advance
+
+# ── Domain Randomization ───────────────────────────────────────────────────────
+# These hooks allow the environment to sample from a range of parameter values
+# instead of a single fixed setting, improving policy robustness.
+domain_randomization:
+  enabled: false                # set true to enable randomization
+  transmission_rate:
+    min: 0.15
+    max: 0.45
+  reporting_lag:
+    min: 0                      # steps of delay in observation
+    max: 3
+  compliance_rate:
+    min: 0.6                    # fraction of population that complies with quarantine
+    max: 1.0
+  budget_fraction:
+    min: 0.5                    # fraction of default vaccine budget available
+    max: 1.5
+
+# ── Logging & Checkpointing ────────────────────────────────────────────────────
+logging:
+  log_interval: 10
+  checkpoint_dir: "checkpoints/curriculum"
+  checkpoint_interval: 100
+  tensorboard_enabled: true
+  tensorboard_dir: "runs/curriculum"
+
+# ── Evaluation (used in adaptive mode and for final eval) ─────────────────────
+eval:
+  n_episodes: 5
+  deterministic: true
+  checkpoint_path: null
+  tasks:
+    - "easy_localized_outbreak"
+    - "medium_multi_center_spread"
+    - "hard_asymptomatic_high_density"
+  seeds: [42, 43, 44]

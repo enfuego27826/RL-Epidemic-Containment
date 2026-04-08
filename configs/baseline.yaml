@@ -15,6 +15,8 @@ ppo:
   batch_size: 256
   n_epochs: 4                            # number of passes over the rollout buffer
   lr: 3.0e-4
+  lr_schedule: "none"                    # "none" | "linear" — linear annealing to lr_final
+  lr_final: 3.0e-5                       # target LR for "linear" schedule (ignored for "none")
   gamma: 0.99                            # discount factor
   gae_lambda: 0.95                       # GAE lambda
   clip_eps: 0.2                          # PPO clip ratio
@@ -24,15 +26,19 @@ ppo:
 
 # ── Network Architecture ───────────────────────────────────────────────────────
 model:
+  encoder_type: "mlp"                    # "mlp" | "st" (gnn_gru)
   obs_dim: null                          # inferred from adapter at runtime
   hidden_dims: [128, 128]
   activation: "relu"
+  encoder_output_dim: 64
 
 # ── Logging & Checkpointing ────────────────────────────────────────────────────
 logging:
   log_interval: 10                       # log every N updates
   checkpoint_dir: "checkpoints/baseline"
   checkpoint_interval: 50               # save checkpoint every N updates
+  tensorboard_enabled: true             # set false to disable TensorBoard
+  tensorboard_dir: "runs/baseline"      # TensorBoard event directory
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 eval:
