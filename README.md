@@ -35,28 +35,98 @@ pip install pyyaml
 
 ## Quick Start
 
-### Smoke Test (< 5 seconds)
+End-to-end flow from a clean clone to a running TensorBoard dashboard:
+
 ```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. (Optional) smoke-test the install — completes in < 5 seconds
 python scripts/train.py --config configs/baseline.yaml --smoke-test
-```
 
-### Run Inference (one episode)
-```bash
-python scripts/inference.py --config configs/baseline.yaml --task easy
-```
+# 3. Train baseline policy (logs to runs/baseline/)
+python scripts/train.py --config configs/baseline.yaml
 
-### Evaluate Policy
-```bash
-python scripts/eval.py --config configs/baseline.yaml
-```
+# 4. Launch TensorBoard to monitor training in real time
+#    (watches all runs under runs/; open http://localhost:6006)
+tensorboard --logdir runs/
 
-### Generate Visuals (charts + graph)
-```bash
-# Run eval and visualize results (with city-network graph)
-python scripts/run_eval_harness.py --config configs/baseline.yaml --output results/eval.json
+# 5. Run multi-task eval harness (all 3 tasks × 3 seeds)
+python scripts/run_eval_harness.py \
+    --config configs/baseline.yaml \
+    --output results/eval.json
+
+# 6. Generate visual report from eval results
 python scripts/visualize.py --input results/eval.json --graph
-# Open out/report/report.html in your browser
+
+# 7. Open the HTML report in your browser
+#    out/report/report.html
 ```
+
+---
+
+## TensorBoard Monitoring
+
+TensorBoard logging is enabled by default for every config (`logging.tensorboard_enabled: true`).
+Event files are written to the directory specified by `logging.tensorboard_dir` in each config.
+
+### Launch TensorBoard
+
+```bash
+# Watch all experiment runs at once
+tensorboard --logdir runs/
+
+# Watch a single experiment
+tensorboard --logdir runs/baseline
+```
+
+Then open <http://localhost:6006> in your browser.
+
+### Log directory layout
+
+| Config | Log directory |
+|---|---|
+| `configs/baseline.yaml` | `runs/baseline` |
+| `configs/curriculum.yaml` | `runs/curriculum` |
+| `configs/ablation_mlp.yaml` | `runs/ablation_mlp` |
+| `configs/ablation_gnn_gru.yaml` | `runs/ablation_gnn_gru` |
+
+### Key scalar groups
+
+All scalars are written every `logging.log_interval` PPO updates.
+
+**`train/` — PPO optimisation health**
+
+| Scalar | Healthy range | What to watch for |
+|---|---|---|
+| `train/policy_loss` | small negative / near 0 | flat at 0 → dead gradient |
+| `train/value_loss` | decreasing | diverging → reduce `vf_coef` |
+| `train/entropy` | gradually decreasing | collapsing instantly → raise `ent_coef` |
+| `train/approx_kl` | 0.01 – 0.05 | > 0.1 consistently → reduce LR |
+| `train/clip_frac` | 0.05 – 0.25 | > 0.4 → policy updating too fast |
+| `train/grad_norm` | < 1.0 | spikes > 5 → adjust `max_grad_norm` |
+| `train/explained_variance` | increasing toward 1.0 | stuck near 0 → value head not learning |
+| `train/learning_rate` | annealing if `lr_schedule: linear` | |
+
+**`advantages/` — rollout quality**
+
+| Scalar | Purpose |
+|---|---|
+| `advantages/mean` | should be near 0 (normalised) |
+| `advantages/std` | should be near 1 (normalised) |
+| `advantages/min` | extreme negatives indicate hard episodes |
+| `advantages/max` | extreme positives indicate easy episodes |
+
+**`env/` — environment diagnostics**
+
+| Scalar | Purpose |
+|---|---|
+| `env/invalid_action_rate` | overall fraction of invalid actions (target < 5% easy, < 12% hard) |
+| `env/invalid_quarantine` | per-type: invalid quarantine rate |
+| `env/invalid_lift_quarantine` | per-type: invalid lift-quarantine rate |
+| `env/invalid_vaccinate` | per-type: invalid vaccinate rate |
+
+To disable TensorBoard logging, set `logging.tensorboard_enabled: false` in your config.
 
 ---
 
@@ -99,6 +169,137 @@ python scripts/train.py --config configs/baseline.yaml \
     --task hard_asymptomatic_high_density \
     --smoke-test
 ```
+
+---
+
+## Configs & Experiment Modes
+
+All configs live in `configs/`. Choose the one that matches your experiment goal:
+
+| Config | Encoder | Mode | Use when |
+|---|---|---|---|
+| `configs/baseline.yaml` | MLP | single task, easy | first training run / smoke test |
+| `configs/curriculum.yaml` | MLP (default) | easy → medium → hard | curriculum progression |
+| `configs/ablation_mlp.yaml` | MLP | medium task | MLP encoder ablation baseline |
+| `configs/ablation_gnn_gru.yaml` | ST-GNN + GRU | medium task | GNN+GRU encoder ablation |
+| `configs/phase2_hybrid.yaml` | MLP | hybrid actions | discrete + continuous action space |
+| `configs/phase3_stgnn.yaml` | ST-GNN | single task | spatiotemporal graph encoder |
+| `configs/phase4_delayed.yaml` | MLP | delayed obs | lagged observation / belief state |
+| `configs/phase6_morl.yaml` | MLP | multi-objective | tuned reward decomposition |
+| `configs/full_pipeline.yaml` | ST-GNN | all phases | full production pipeline |
+
+### Baseline
+
+```bash
+python scripts/train.py --config configs/baseline.yaml
+```
+
+Key knobs in `configs/baseline.yaml`:
+- `ppo.total_timesteps` — training budget (default 200 000)
+- `ppo.lr` / `ppo.lr_schedule` — learning rate (`none` or `linear` annealing)
+- `model.encoder_type` — `mlp` (default) or `st` (GNN+GRU)
+- `logging.tensorboard_dir` — where event files land
+
+### Curriculum (easy → medium → hard)
+
+```bash
+python scripts/train.py --config configs/curriculum.yaml
+```
+
+The `curriculum.mode` key controls progression:
+- `sequential` — 200 k steps on easy, then 200 k on medium, then 200 k on hard
+- `mixed` — sample tasks each episode according to `curriculum.task_weights`
+- `adaptive` — advance when eval gate passes (requires `curriculum.gate_pass_required: true`)
+
+Domain randomisation (transmission rate, reporting lag, compliance, budget) is controlled by `domain_randomization.enabled`.
+
+### Ablation: MLP vs GNN+GRU
+
+Run both configs on the same task and compare TensorBoard curves and eval harness scores:
+
+```bash
+# Ablation A — MLP encoder
+python scripts/train.py --config configs/ablation_mlp.yaml
+
+# Ablation B — ST-GNN + GRU encoder
+python scripts/train.py --config configs/ablation_gnn_gru.yaml
+
+# Compare results side by side in one TensorBoard instance
+# (colon-separated paths load both runs; use the Runs filter to toggle each)
+tensorboard --logdir ablation_mlp:runs/ablation_mlp,ablation_gnn_gru:runs/ablation_gnn_gru
+```
+
+The only difference between the two configs is `model.encoder_type` (`mlp` vs `st`) and the corresponding GNN dimension settings.
+
+---
+
+## Evaluation Gates
+
+Evaluation gates are hard thresholds that a trained policy must pass before it is considered production-quality.  
+They are implemented in `src/eval/eval_gates.py` and integrated into `scripts/run_eval_harness.py`.
+
+### Gate thresholds
+
+| Task | Peak Inf ↓ | Economy ↑ | Inv% ↓ |
+|---|---|---|---|
+| easy (`easy_localized_outbreak`) | < 0.30 | > 0.85 | < 5% |
+| medium (`medium_multi_center_spread`) | < 0.45 | > 0.80 | < 8% |
+| hard (`hard_asymptomatic_high_density`) | < 0.60 | > 0.75 | < 12% |
+
+### Run gate checks
+
+```bash
+# Run eval harness, save results, then check gates
+python scripts/run_eval_harness.py \
+    --config configs/baseline.yaml \
+    --output results/eval.json
+
+# Visualize gate pass/fail in the HTML report
+python scripts/visualize.py --input results/eval.json
+# Open out/report/report.html
+```
+
+Gate results are printed to stdout after the harness finishes.  
+A `PASS` on all three tasks is the milestone target.  
+Gate checks can also be called programmatically:
+
+```python
+from src.eval.eval_gates import check_gates_from_episode_results, generate_gate_report
+from src.eval.scenario_runner import EvalHarness
+
+harness = EvalHarness(config)
+results = harness.run()
+gate_results = check_gates_from_episode_results(results)
+print(generate_gate_report(gate_results))
+```
+
+---
+
+## OpenEnv Conformance
+
+This project targets the [OpenEnv](https://github.com/openenv) benchmark protocol.  
+The `OpenEnvAdapter` in `src/env/openenv_adapter.py` wraps the local `EpidemicContainmentStrategyEnv` and exposes the standard `reset` / `step` / `state` interface expected by the benchmark.
+
+### Adapter expectations
+
+- `reset()` returns a flat observation dict conforming to the OpenEnv observation schema.
+- `step(action)` accepts an `EpidemicAction` (Pydantic model) with an `interventions` list.
+- Invalid actions are counted and clamped; the episode is never aborted by an invalid action alone.
+- Per-action-type invalid counts (`quarantine`, `lift_quarantine`, `vaccinate`) are accumulated and surfaced as TensorBoard `env/invalid_*` scalars.
+
+### Conformance assertion
+
+A static method is available to validate that the environment module is correctly installed:
+
+```python
+from src.env.openenv_adapter import OpenEnvAdapter
+
+# Raises ImportError if openenv-core is not installed or env.py is missing.
+# Raises AssertionError if EpidemicContainmentStrategyEnv is not exported from the env module.
+OpenEnvAdapter.assert_openenv_conformance()
+```
+
+This assertion is also run automatically by the smoke-test suite (`src/tests/smoke_new_features.py`).
 
 ---
 
@@ -199,6 +400,12 @@ morl:                      # Phase 6 — multi-objective RL
     control: 0.1
     penalty: 0.1
 
+logging:
+  log_interval: 10              # log every N updates
+  checkpoint_dir: "checkpoints/baseline"
+  tensorboard_enabled: true     # set false to disable TensorBoard
+  tensorboard_dir: "runs/baseline"  # TensorBoard event directory
+
 eval:
   tasks: [easy_localized_outbreak, medium_multi_center_spread, hard_asymptomatic_high_density]
   seeds: [42, 43, 44]
@@ -211,6 +418,9 @@ eval:
 | File | Description |
 |---|---|
 | `configs/baseline.yaml` | Phase 1 MLP baseline |
+| `configs/curriculum.yaml` | Curriculum training (easy → medium → hard) |
+| `configs/ablation_mlp.yaml` | MLP encoder ablation (medium task) |
+| `configs/ablation_gnn_gru.yaml` | ST-GNN + GRU encoder ablation (medium task) |
 | `configs/phase2_hybrid.yaml` | Phase 2 hybrid actions |
 | `configs/phase3_stgnn.yaml` | Phase 3 ST-GNN encoder |
 | `configs/phase4_delayed.yaml` | Phase 4 delayed observations |
@@ -253,6 +463,9 @@ hard_asymptomatic_high_density         3   -12.6±0.5   0.75±0.12   0.62±0.03 
 ```
 ├── configs/                # experiment configs
 │   ├── baseline.yaml
+│   ├── curriculum.yaml         # curriculum: easy → medium → hard
+│   ├── ablation_mlp.yaml       # MLP encoder ablation
+│   ├── ablation_gnn_gru.yaml   # ST-GNN + GRU encoder ablation
 │   ├── phase2_hybrid.yaml
 │   ├── phase3_stgnn.yaml
 │   ├── phase4_delayed.yaml
@@ -262,10 +475,11 @@ hard_asymptomatic_high_density         3   -12.6±0.5   0.75±0.12   0.62±0.03 
 │   ├── train.py            # training entry-point
 │   ├── eval.py             # evaluation entry-point
 │   ├── inference.py        # run one episode
-│   └── run_eval_harness.py # multi-task/seed evaluation
+│   ├── run_eval_harness.py # multi-task/seed evaluation + gate checks
+│   └── visualize.py        # charts, graph, animated GIF, HTML report
 ├── src/
 │   ├── env/
-│   │   ├── openenv_adapter.py    # env wrapper + normalisation
+│   │   ├── openenv_adapter.py    # env wrapper + OpenEnv conformance
 │   │   ├── action_masking.py     # invalid-action masks
 │   │   └── belief_state.py       # Phase 4: lag + history buffer
 │   ├── models/
@@ -275,13 +489,16 @@ hard_asymptomatic_high_density         3   -12.6±0.5   0.75±0.12   0.62±0.03 
 │   ├── system_id/
 │   │   └── estimator.py          # Phase 5 rolling beta/gamma estimator
 │   ├── train/
-│   │   ├── ppo_baseline.py       # Phase 1/2 PPO training loop
-│   │   └── ppo_morl.py           # Phase 6 multi-objective PPO
+│   │   ├── ppo_baseline.py       # Phase 1/2/3 PPO training loop
+│   │   ├── ppo_morl.py           # Phase 6 multi-objective PPO
+│   │   └── tb_logger.py          # TensorBoard wrapper (graceful fallback)
 │   ├── eval/
-│   │   └── scenario_runner.py    # Phase 7 evaluation harness
+│   │   ├── scenario_runner.py    # Phase 7 evaluation harness
+│   │   └── eval_gates.py         # gate thresholds + pass/fail checks
 │   └── tests/
 │       ├── smoke_phase2.py       # Phase 2 smoke tests
-│       └── smoke_phases3to8.py   # Phases 3–8 smoke tests
+│       ├── smoke_phases3to8.py   # Phases 3–8 smoke tests
+│       └── smoke_new_features.py # TensorBoard + gate + conformance smoke tests
 ├── env.py                  # EpidemicContainmentStrategyEnv
 ├── engine.py               # GraphEpidemicEngine (SIR dynamics)
 ├── models.py               # Pydantic observation/action models
@@ -410,7 +627,9 @@ All scripts exit with code 0 on success and print `[PASS]` / `[FAIL]` per check.
 |---|---|
 | `ModuleNotFoundError: No module named 'openenv'` | Run `pip install openenv-core` |
 | `ModuleNotFoundError: No module named 'yaml'` | Run `pip install pyyaml` |
+| `ModuleNotFoundError: No module named 'tensorboard'` | Run `pip install tensorboard` (TBLogger degrades to text logs if absent) |
 | `AssertionError: Episode already completed` | The env was stepped after `done=True`; call `reset()` first |
+| TensorBoard shows no data | Check `logging.tensorboard_enabled: true` and that `runs/` directory exists |
 | Low economy scores | Increase `morl.weights.economy` in the config |
 | High invalid action rate | Ensure `hybrid.masking_enabled: true` in config |
 | Training is slow | Reduce `ppo.total_timesteps` or use `--smoke-test` |
@@ -483,7 +702,7 @@ The environment uses dense per-step rewards instead of a sparse terminal signal.
 
 ## Tasks
 
-Exactly three tasks are implemented in [`tasks.py`](/d:/openenv/tasks.py).
+Exactly three tasks are implemented in [`tasks.py`](tasks.py).
 
 ### Easy: `easy_localized_outbreak`
 
@@ -515,12 +734,12 @@ Exactly three tasks are implemented in [`tasks.py`](/d:/openenv/tasks.py).
 
 ## Files
 
-- [`engine.py`](/d:/openenv/engine.py): graph SIR + economy engine
-- [`models.py`](/d:/openenv/models.py): Pydantic action, observation, and state schemas
-- [`env.py`](/d:/openenv/env.py): local env API plus OpenEnv adapter
-- [`tasks.py`](/d:/openenv/tasks.py): task definitions, graders, and rule-based baseline
-- [`server_app.py`](/d:/openenv/server_app.py): FastAPI / OpenEnv server entrypoint
-- [`inference.py`](/d:/openenv/inference.py): LLM evaluation script with strict stdout formatting
+- [`engine.py`](engine.py): graph SIR + economy engine
+- [`models.py`](models.py): Pydantic action, observation, and state schemas
+- [`env.py`](env.py): local env API plus OpenEnv adapter
+- [`tasks.py`](tasks.py): task definitions, graders, and rule-based baseline
+- [`server_app.py`](server_app.py): FastAPI / OpenEnv server entrypoint
+- [`inference.py`](inference.py): LLM evaluation script with strict stdout formatting
 
 ## Setup
 
@@ -690,7 +909,7 @@ The container starts `uvicorn server_app:app` and is intended to be deployable a
 
 ## Baseline Scores Achieved
 
-Using the built-in rule-based policy in [`tasks.py`](/d:/openenv/tasks.py) with seed `42`:
+Using the built-in rule-based policy in [`tasks.py`](tasks.py) with seed `42`:
 
 - Easy: `1.00`
 - Medium: `0.84`
