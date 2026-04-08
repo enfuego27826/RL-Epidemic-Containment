@@ -19,6 +19,8 @@ ppo:
   batch_size: 256
   n_epochs: 4
   lr: 3.0e-4
+  lr_schedule: "none"
+  lr_final: 3.0e-5
   gamma: 0.99
   gae_lambda: 0.95
   clip_eps: 0.2
@@ -76,6 +78,8 @@ logging:
   log_interval: 10
   checkpoint_dir: "checkpoints/full_pipeline"
   checkpoint_interval: 50
+  tensorboard_enabled: true
+  tensorboard_dir: "runs/full_pipeline"
 
 # ── Evaluation (Phase 7 harness) ──────────────────────────────────────────────
 eval:

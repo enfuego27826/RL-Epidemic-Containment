@@ -131,6 +131,43 @@ class OpenEnvAdapter:
         self._total_steps: int = 0
         self._total_decisions: int = 0
 
+        # Per-action-type invalid counts for diagnostics.
+        # Keys match action name strings: "quarantine", "lift", "vaccinate".
+        self._invalid_by_type: dict[str, int] = {
+            "quarantine": 0,
+            "lift": 0,
+            "vaccinate": 0,
+        }
+
+    # ------------------------------------------------------------------
+    # OpenEnv conformance assertion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def assert_openenv_conformance() -> None:
+        """Assert that the OpenEnv integration is active and well-formed.
+
+        Raises
+        ------
+        AssertionError
+            If the underlying environment is not an OpenEnv-compatible
+            ``EpidemicContainmentStrategyEnv`` instance.
+        ImportError
+            If the ``env`` module (providing ``EpidemicContainmentStrategyEnv``)
+            cannot be imported.
+        """
+        from env import EpidemicContainmentStrategyEnv as _Env  # noqa: F401
+        assert _Env is not None, (
+            "OpenEnv conformance check failed: EpidemicContainmentStrategyEnv is None."
+        )
+        # Verify the openenv.core interface is present via the env module
+        import env as _env_module
+        assert hasattr(_env_module, "EpidemicContainmentStrategyEnv"), (
+            "OpenEnv conformance check failed: EpidemicContainmentStrategyEnv not "
+            "exported from env module.  Ensure openenv-core is installed and the "
+            "env.py adapter is up-to-date."
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -164,6 +201,7 @@ class OpenEnvAdapter:
         self._invalid_action_count = 0
         self._total_steps = 0
         self._total_decisions = 0
+        self._invalid_by_type = {"quarantine": 0, "lift": 0, "vaccinate": 0}
 
         obs_tensor = self._obs_to_tensor(obs_model)
         info: dict[str, Any] = {
@@ -216,6 +254,8 @@ class OpenEnvAdapter:
             self._invalid_action_count / self._total_decisions
             if self._total_decisions > 0 else 0.0
         )
+        # Per-action-type invalid counts (cumulative for this episode)
+        info["invalid_by_type"] = dict(self._invalid_by_type)
         return obs_tensor, float(reward), bool(done), info
 
     @property
@@ -337,6 +377,7 @@ class OpenEnvAdapter:
                 if is_q:
                     # Already quarantined — invalid; count and skip
                     self._invalid_action_count += 1
+                    self._invalid_by_type["quarantine"] += 1
                     continue
                 interventions.append({"kind": "quarantine", "node_id": node_id})
 
@@ -344,6 +385,7 @@ class OpenEnvAdapter:
                 if not is_q:
                     # Not quarantined — invalid; count and skip
                     self._invalid_action_count += 1
+                    self._invalid_by_type["lift"] += 1
                     continue
                 interventions.append({"kind": "lift_quarantine", "node_id": node_id})
 
